@@ -35,6 +35,7 @@
 #include <assert.h>
 #include "esp_heap_caps.h"  // For heap_caps_get_free_size/largest_free_block
 #include "stack/a2dp_decoder_arena.h"
+#include "esp_timer.h"
 #if (defined(OPUS_DEC_INCLUDED) && OPUS_DEC_INCLUDED == TRUE)
 #include "stack/a2dp_vendor_opus_decoder.h"
 #endif
@@ -95,6 +96,19 @@ enum {
 #define MAX_OUTPUT_A2DP_SNK_FRAME_QUEUE_SZ     (24)
 
 #define BTC_A2DP_SNK_DATA_QUEUE_IDX            (1)
+
+/* Jitter buffer: after a stream (re)start, hold decoding until this much
+ * time's worth of encoded packets has queued. The decoded PCM ring only holds
+ * ~10 ms at 96 kHz; packet arrival gaps on a busy link (LDAC 990 kbps) are
+ * longer than that. Buffering the reserve as encoded packets is ~6x cheaper
+ * in RAM than buffering decoded PCM. The sink delay report
+ * (a2dp_sink_native.cpp, +150 ms) already covers this added latency.
+ */
+#define BTC_A2DP_SNK_JITTER_PREBUFFER_US       (40000)
+
+/* Jitter buffer state, owned by the sink task */
+static BOOLEAN jb_primed = FALSE;
+static int64_t jb_start_us = 0;
 
 #define A2DP_TASK_NAME                   "A2DP_DECODER"
 /* Opus is the deepest decoder: it keeps per-frame scratch in VLAs on the
@@ -542,6 +556,23 @@ static void btc_a2dp_sink_data_ready(UNUSED_ATTR void *context)
     }
 
     nb_of_msgs_to_process = fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
+
+    /* Prime the jitter buffer: let packets accumulate before the first
+     * decode. Each newly queued packet re-runs this handler, so priming ends
+     * within one packet interval of the target. */
+    if (!jb_primed) {
+        if (nb_of_msgs_to_process == 0) {
+            return;
+        }
+        int64_t now_us = esp_timer_get_time();
+        if (jb_start_us == 0) {
+            jb_start_us = now_us;
+        }
+        if (now_us - jb_start_us < BTC_A2DP_SNK_JITTER_PREBUFFER_US) {
+            return;
+        }
+        jb_primed = TRUE;
+    }
     APPL_TRACE_DEBUG("nb:%d", nb_of_msgs_to_process);
     while (nb_of_msgs_to_process > 0) {
         if (btc_a2dp_sink_state != BTC_A2DP_SINK_STATE_ON){
@@ -858,6 +889,9 @@ static void btc_a2dp_sink_handle_clear_track (void)
  *******************************************************************************/
 static void btc_a2dp_sink_flush_q(fixed_queue_t *p_q)
 {
+    /* Any flush (stream stop, suspend, codec reset) re-arms the prebuffer */
+    jb_primed = FALSE;
+    jb_start_us = 0;
     while (! fixed_queue_is_empty(p_q)) {
         void *buf = fixed_queue_dequeue(p_q, 0);
         if (buf) {
