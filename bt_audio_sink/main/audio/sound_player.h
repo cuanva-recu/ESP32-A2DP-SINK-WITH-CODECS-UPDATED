@@ -199,7 +199,8 @@ enum SoundType {
     SOUND_PAIRING = 1,
     SOUND_CONNECTED = 2,
     SOUND_MAX_VOLUME = 3,
-    SOUND_TYPE_COUNT = 4
+    SOUND_DISCONNECTED = 4,
+    SOUND_TYPE_COUNT = 5
 };
 
 // Playback modes
@@ -229,7 +230,24 @@ static const char* SOUND_PATHS[SOUND_TYPE_COUNT] = {
     "/spiffs/startup.wav",
     "/spiffs/pairing.wav",
     "/spiffs/connected.wav",
-    "/spiffs/volumemax.wav"
+    "/spiffs/volumemax.wav",
+    "/spiffs/disconnected.wav"
+};
+
+// Built-in chimes, synthesised when no WAV file is stored for the sound.
+struct ChimeNote {
+    float freqHz;
+    float durationSec;
+};
+
+static const ChimeNote CHIME_CONNECTED[] = {
+    {659.25f, 0.11f},   // E5
+    {987.77f, 0.24f},   // B5 - rising fifth
+};
+
+static const ChimeNote CHIME_DISCONNECTED[] = {
+    {987.77f, 0.11f},   // B5
+    {659.25f, 0.24f},   // E5 - falling fifth
 };
 
 class SoundPlayer {
@@ -348,6 +366,16 @@ public:
         return (m_soundStatus & (1 << type)) != 0;
     }
 
+    // True if the sound has a synthesised fallback when no WAV is stored
+    static bool hasBuiltinChime(SoundType type) {
+        return type == SOUND_CONNECTED || type == SOUND_DISCONNECTED;
+    }
+
+    // True if the sound can be played (stored WAV or built-in chime)
+    bool canPlay(SoundType type) const {
+        return hasSound(type) || hasBuiltinChime(type);
+    }
+
     // Queue next sound to play after current finishes
     void queueNext(SoundType type) {
         m_pendingSound = type;
@@ -365,7 +393,7 @@ public:
     bool play(SoundType type, SoundPlayMode mode = SOUND_MODE_EXCLUSIVE) {
         if (!m_initialized || m_muted) return false;
         if (type >= SOUND_TYPE_COUNT) return false;
-        if (!hasSound(type)) return false;
+        if (!canPlay(type)) return false;
 
         // Hard safety rule for the mixer architecture:
         // the max-volume UI sound must NEVER take over I2S directly. It is a
@@ -532,7 +560,181 @@ private:
     }
     
     void doPlayback() {
-        ESP_LOGD(TAG, ">>> doPlayback task started");
+        if (hasSound(m_currentSound)) {
+            playFile();
+        } else if (hasBuiltinChime(m_currentSound)) {
+            playChime();
+        } else {
+            m_playing = false;
+        }
+        finishPlayback();
+    }
+
+    // Begin ducking the BT audio for the whole overlay effect.
+    bool beginOverlay() {
+        if (m_playMode == SOUND_MODE_OVERLAY && m_overlayStartFunc && m_overlayPushFunc) {
+            m_overlayStartFunc();
+            return true;
+        }
+        return false;
+    }
+
+    // End ducking: ramp the BT audio back to full volume.
+    void endOverlay(bool overlayStarted) {
+        if (overlayStarted && m_overlayEndFunc) {
+            m_overlayEndFunc();
+        }
+
+        // If this was stopped/aborted before the overlay was started, make sure
+        // there is no stale overlay state left behind. This is intentionally only
+        // a stop signal; OverlayMixer will drain already queued frames before
+        // restoring the BT gain.
+        if (m_playMode == SOUND_MODE_OVERLAY && !overlayStarted && m_overlayEndFunc) {
+            m_overlayEndFunc();
+        }
+    }
+
+    // Send one chunk of 32-bit stereo frames to the overlay mixer or I2S.
+    // Returns false when playback should abort.
+    bool outputChunk(int32_t* outputS32, size_t outputFrames, uint32_t &consecutiveWriteFailures) {
+        static constexpr uint32_t maxConsecutiveFailures = 20;  // Abort after 20 consecutive I2S write failures
+
+        if (outputFrames == 0) return true;
+
+        if (m_playMode == SOUND_MODE_OVERLAY && m_overlayPushFunc) {
+            // Push to the overlay mixer, retrying the remainder when the
+            // ring is full. The render drains the ring at the real I2S
+            // rate, so waiting for space paces us to real time AND drops
+            // nothing (no truncation/choppiness at high sample rates).
+            size_t pushed = 0;
+            uint32_t guard = 0;
+            while (pushed < outputFrames && !m_stopRequested) {
+                size_t n = m_overlayPushFunc(outputS32 + pushed * 2,
+                                             outputFrames - pushed);
+                pushed += n;
+                if (pushed < outputFrames) {
+                    vTaskDelay(1);  // ring full: let the render drain it
+                    if (++guard > 120) {
+                        ESP_LOGW(TAG, "Overlay ring did not drain; aborting sound stream");
+                        m_stopRequested = true;
+                        break;
+                    }
+                }
+            }
+        } else if (m_playMode == SOUND_MODE_EXCLUSIVE && m_i2sWriteFunc) {
+            // Write directly to I2S (exclusive mode)
+            size_t written = m_i2sWriteFunc((uint8_t*)outputS32, outputFrames * 2 * sizeof(int32_t));
+            if (written == 0) {
+                consecutiveWriteFailures++;
+                if (consecutiveWriteFailures >= maxConsecutiveFailures) {
+                    ESP_LOGW(TAG, "Too many I2S write failures (%u), aborting playback", consecutiveWriteFailures);
+                    return false;
+                }
+                // I2S might be reconfiguring, wait a bit
+                vTaskDelay(pdMS_TO_TICKS(10));
+            } else {
+                consecutiveWriteFailures = 0;  // Reset on successful write
+            }
+        }
+        return true;
+    }
+
+    // Synthesise the built-in chime for m_currentSound at the current I2S rate.
+    void playChime() {
+        const ChimeNote* notes = CHIME_CONNECTED;
+        size_t noteCount = sizeof(CHIME_CONNECTED) / sizeof(CHIME_CONNECTED[0]);
+        if (m_currentSound == SOUND_DISCONNECTED) {
+            notes = CHIME_DISCONNECTED;
+            noteCount = sizeof(CHIME_DISCONNECTED) / sizeof(CHIME_DISCONNECTED[0]);
+        }
+
+        static constexpr float kAmplitude = 0.35f;     // ~-9 dBFS
+        static constexpr float kAttackSec = 0.004f;
+        static constexpr float kReleaseSec = 0.010f;
+        static constexpr float kTwoPi = 6.28318531f;
+
+        int32_t* outputS32 = m_outputS32;
+        uint32_t consecutiveWriteFailures = 0;
+        m_sampleRateChanged = false;
+
+        bool overlayStarted = beginOverlay();
+
+        for (size_t n = 0; n < noteCount && !m_stopRequested; n++) {
+            float rate = (float)(m_targetSampleRate ? m_targetSampleRate : 44100);
+            const size_t totalFrames = (size_t)(notes[n].durationSec * rate);
+            const size_t attackFrames = (size_t)(kAttackSec * rate);
+            const size_t releaseFrames = (size_t)(kReleaseSec * rate);
+            // Exponential decay to ~5% over the note, like a struck bell
+            const float decayPerFrame = expf(-3.0f / (float)totalFrames);
+            float phaseInc = kTwoPi * notes[n].freqHz / rate;
+            float phase = 0.0f;
+            float decay = 1.0f;
+
+            size_t frame = 0;
+            while (frame < totalFrames && !m_stopRequested) {
+                if (m_sampleRateChanged) {
+                    rate = (float)(m_targetSampleRate ? m_targetSampleRate : 44100);
+                    phaseInc = kTwoPi * notes[n].freqHz / rate;
+                    m_sampleRateChanged = false;
+                }
+
+                size_t chunk = totalFrames - frame;
+                if (chunk > kMaxOutputFrames) chunk = kMaxOutputFrames;
+
+                for (size_t i = 0; i < chunk; i++, frame++) {
+                    float env = decay;
+                    if (frame < attackFrames) {
+                        env *= (float)frame / (float)attackFrames;
+                    }
+                    size_t left = totalFrames - frame;
+                    if (left < releaseFrames) {
+                        env *= (float)left / (float)releaseFrames;
+                    }
+                    // Fundamental plus a soft second harmonic for a bell-like tone
+                    float v = sinf(phase) + 0.2f * sinf(2.0f * phase);
+                    int32_t sample = (int32_t)(v * env * (kAmplitude / 1.2f) * 2147483647.0f);
+                    outputS32[i * 2 + 0] = sample;
+                    outputS32[i * 2 + 1] = sample;
+
+                    phase += phaseInc;
+                    if (phase >= kTwoPi) phase -= kTwoPi;
+                    decay *= decayPerFrame;
+                }
+
+                if (!outputChunk(outputS32, chunk, consecutiveWriteFailures)) {
+                    m_stopRequested = true;
+                    break;
+                }
+                vTaskDelay(1);
+            }
+        }
+
+        endOverlay(overlayStarted);
+        ESP_LOGI(TAG, "Played built-in %s chime",
+                 m_currentSound == SOUND_DISCONNECTED ? "disconnect" : "connect");
+    }
+
+    // Check for a queued sound, then clear playing state.
+    void finishPlayback() {
+        SoundType pending = (SoundType)m_pendingSound;
+        SoundPlayMode pendingMode = m_pendingMode;
+        m_pendingSound = -1;
+        m_playing = false;
+        
+        // Re-arm the persistent task for the pending sound (no spawn/alloc).
+        if (pending >= 0 && pending < SOUND_TYPE_COUNT && canPlay(pending) && !m_muted) {
+            m_currentSound = pending;
+            m_playMode = pendingMode;
+            m_playing = true;
+            m_stopRequested = false;
+            m_playRequested = true;
+            if (m_playbackTaskHandle) xTaskNotifyGive(m_playbackTaskHandle);
+            ESP_LOGD(TAG, "Playing queued sound: %d", pending);
+        }
+    }
+
+    void playFile() {
+        ESP_LOGD(TAG, ">>> playFile started");
         
         xSemaphoreTake(m_mutex, portMAX_DELAY);
         
@@ -662,12 +864,7 @@ private:
         ESP_LOGD(TAG, "Resampler: ratio=%.4f, input=%u frames, output max=%u frames",
                  resampler.ratio, (unsigned)inputChunkFrames, (unsigned)maxOutputFrames);
         
-        // Begin ducking the BT audio for the whole overlay effect.
-        bool overlayStarted = false;
-        if (m_playMode == SOUND_MODE_OVERLAY && m_overlayStartFunc && m_overlayPushFunc) {
-            m_overlayStartFunc();
-            overlayStarted = true;
-        }
+        bool overlayStarted = beginOverlay();
         
         // Streaming playback loop
         size_t totalDataBytes = dataChunkSize;
@@ -675,7 +872,6 @@ private:
         uint32_t playbackStartTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
         uint32_t maxPlaybackTimeMs = 10000;  // Maximum 10 seconds for any sound
         uint32_t consecutiveWriteFailures = 0;
-        const uint32_t maxConsecutiveFailures = 20;  // Abort after 20 consecutive I2S write failures
 
         // This is a strict streaming loop: one small SPIFFS read, one resample,
         // one overlay push. When bytesRead reaches the data chunk size or stop()
@@ -742,83 +938,21 @@ private:
             );
             
             // Output samples
-            if (outputFrames > 0) {
-                if (m_playMode == SOUND_MODE_OVERLAY && m_overlayPushFunc) {
-                    // Push to the overlay mixer, retrying the remainder when the
-                    // ring is full. The render drains the ring at the real I2S
-                    // rate, so waiting for space paces us to real time AND drops
-                    // nothing (no truncation/choppiness at high sample rates).
-                    size_t pushed = 0;
-                    uint32_t guard = 0;
-                    while (pushed < outputFrames && !m_stopRequested) {
-                        size_t n = m_overlayPushFunc(outputS32 + pushed * 2,
-                                                     outputFrames - pushed);
-                        pushed += n;
-                        if (pushed < outputFrames) {
-                            vTaskDelay(1);  // ring full: let the render drain it
-                            if (++guard > 120) {
-                                ESP_LOGW(TAG, "Overlay ring did not drain; aborting sound stream");
-                                m_stopRequested = true;
-                                break;
-                            }
-                        }
-                    }
-                } else if (m_playMode == SOUND_MODE_EXCLUSIVE && m_i2sWriteFunc) {
-                    // Write directly to I2S (exclusive mode)
-                    size_t written = m_i2sWriteFunc((uint8_t*)outputS32, outputFrames * 2 * sizeof(int32_t));
-                    if (written == 0) {
-                        consecutiveWriteFailures++;
-                        if (consecutiveWriteFailures >= maxConsecutiveFailures) {
-                            ESP_LOGW(TAG, "Too many I2S write failures (%u), aborting playback", consecutiveWriteFailures);
-                            break;
-                        }
-                        // I2S might be reconfiguring, wait a bit
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                    } else {
-                        consecutiveWriteFailures = 0;  // Reset on successful write
-                    }
-                }
+            if (!outputChunk(outputS32, outputFrames, consecutiveWriteFailures)) {
+                break;
             }
             
             // Small yield to prevent watchdog
             vTaskDelay(1);
         }
         
-        // End ducking: ramp the BT audio back to full volume.
-        if (overlayStarted && m_overlayEndFunc) {
-            m_overlayEndFunc();
-        }
-
-        // If this was stopped/aborted before the overlay was started, make sure
-        // there is no stale overlay state left behind. This is intentionally only
-        // a stop signal; OverlayMixer will drain already queued frames before
-        // restoring the BT gain.
-        if (m_playMode == SOUND_MODE_OVERLAY && !overlayStarted && m_overlayEndFunc) {
-            m_overlayEndFunc();
-        }
+        endOverlay(overlayStarted);
         
         // Close the file. Buffers are persistent -- do NOT free them, and do NOT
         // touch m_playbackTaskHandle (the task lives for the program's lifetime).
         fclose(f);
         
         ESP_LOGD(TAG, "Playback complete");
-        
-        // Check for a queued sound, then clear playing state.
-        SoundType pending = (SoundType)m_pendingSound;
-        SoundPlayMode pendingMode = m_pendingMode;
-        m_pendingSound = -1;
-        m_playing = false;
-        
-        // Re-arm the persistent task for the pending sound (no spawn/alloc).
-        if (pending >= 0 && pending < SOUND_TYPE_COUNT && hasSound(pending) && !m_muted) {
-            m_currentSound = pending;
-            m_playMode = pendingMode;
-            m_playing = true;
-            m_stopRequested = false;
-            m_playRequested = true;
-            if (m_playbackTaskHandle) xTaskNotifyGive(m_playbackTaskHandle);
-            ESP_LOGD(TAG, "Playing queued sound: %d", pending);
-        }
     }
     
     // Persistent playback task: created ONCE at init and reused for every sound.

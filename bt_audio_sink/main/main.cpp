@@ -102,6 +102,8 @@
  // Connected sound delay - wait for codec to stabilize before playing
  static volatile int64_t  g_lastCodecConfigTime = 0;    // Timestamp of last codec config
  static volatile bool     g_connectedSoundPending = false;  // True if waiting to play connected sound
+ static volatile bool     g_disconnectSoundPending = false; // True if waiting to play disconnect sound
+ static const int64_t     DISCONNECT_SOUND_DELAY_US = 1500000;  // 1.5s - codec switches reconnect well within this
  static const int64_t     CODEC_STABLE_DELAY_US = 400000;   // 400ms - wait this long after last codec config
  
  // Connection timestamp - to ignore initial volume report from phone
@@ -1629,6 +1631,12 @@
      }
      
      if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+         // Play the disconnect sound later, unless the source reconnects first
+         // (codec switches drop and restore the link within a few hundred ms)
+         if (g_a2dpConnected) {
+             g_disconnectSoundPending = true;
+         }
+
          // Mark as disconnected
          g_a2dpConnected = false;
          
@@ -1662,6 +1670,7 @@
          
          // Mark as connected
          g_a2dpConnected = true;
+         g_disconnectSoundPending = false;
          
          // Restart BLE advertising so the app can still connect via BLE while A2DP is active
          g_ble.restartAdvertising();
@@ -1783,6 +1792,23 @@
              }
          }
          
+         // Play the disconnect sound once the link has stayed down long enough
+         // that this is a real disconnect rather than a codec switch
+         if (g_disconnectSoundPending &&
+             esp_timer_get_time() - g_lastDisconnectTime >= DISCONNECT_SOUND_DELAY_US) {
+             g_disconnectSoundPending = false;
+             if (g_a2dpConnected) {
+                 // Reconnected in the meantime - nothing to announce
+             } else if (g_pairingModeActive) {
+                 ESP_LOGI(TAG, "Pairing mode active - skipping disconnect sound");
+             } else {
+                 ESP_LOGI(TAG, "A2DP link down for %lld ms - playing disconnect sound at %u Hz",
+                          (esp_timer_get_time() - g_lastDisconnectTime) / 1000,
+                          (unsigned)g_i2s.getSampleRate());
+                 g_sound.play(SOUND_DISCONNECTED, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+             }
+         }
+
          bool r1 = gpio_get_level((gpio_num_t)APP_BUTTON1_GPIO);
          if (r1 != lastBtn1) debounce1 = now;
          if ((now - debounce1) > 25) {
