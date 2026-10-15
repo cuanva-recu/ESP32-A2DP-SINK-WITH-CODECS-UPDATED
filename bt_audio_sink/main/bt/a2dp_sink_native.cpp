@@ -19,8 +19,12 @@
 
 // Opus over A2DP vendor codec constants. This stack decodes Opus to 48 kHz
 // signed 16-bit PCM, so report 48k/16-bit to the render pipeline.
-#define A2DP_OPUS_VENDOR_ID          0x000005F1
-#define A2DP_OPUS_CODEC_ID           0x1005
+#define A2DP_OPUS_PIPEWIRE_VENDOR_ID 0x000005F1
+#define A2DP_OPUS_PIPEWIRE_CODEC_ID  0x1005
+#define A2DP_OPUS_ANDROID_VENDOR_ID  0x000000E0
+#define A2DP_OPUS_ANDROID_CODEC_ID   0x0001
+#define A2DP_OPUS_ANDROID_CHANNEL_MODE_MASK 0x07
+#define A2DP_OPUS_ANDROID_CHANNEL_MODE_MONO 0x01
 
 #define BT_AV_TAG    "BT_AV"
 #define BT_RC_TG_TAG "BT_RC_TG"
@@ -238,8 +242,8 @@ void NativeA2DPSink::av_hdl_a2d_evt(uint16_t event, void *p_param) {
                 bits = 32;
                 sr = 48000;
                 ESP_LOGI(BT_AV_TAG, "Detected aptX-LL codec sr=%u ch=%u", sr, ch);
-            } else if (vendorId == A2DP_OPUS_VENDOR_ID && codecId == A2DP_OPUS_CODEC_ID) {
-                // A2DP Opus vendor codec. The ESP-IDF Opus decoder path outputs
+            } else if (vendorId == A2DP_OPUS_PIPEWIRE_VENDOR_ID && codecId == A2DP_OPUS_PIPEWIRE_CODEC_ID) {
+                // PipeWire Opus 05. The ESP-IDF Opus decoder path outputs
                 // interleaved opus_int16 PCM at 48 kHz. In the CIE, raw[6] is
                 // channel count and raw[7] is coupled stream count.
                 sr = 48000;
@@ -248,6 +252,15 @@ void NativeA2DPSink::av_hdl_a2d_evt(uint16_t event, void *p_param) {
                 if (ch == 0 || ch > 2) ch = 2;
                 ESP_LOGI(BT_AV_TAG, "Detected Opus codec sr=%u bits=%u ch=%u coupled=%u",
                          sr, bits, ch, raw[7]);
+            } else if (vendorId == A2DP_OPUS_ANDROID_VENDOR_ID && codecId == A2DP_OPUS_ANDROID_CODEC_ID) {
+                // Android (Google) Opus. Same decoder output as Opus 05; raw[6]
+                // packs channel mode, frame size and the 48 kHz flag.
+                sr = 48000;
+                bits = 16;
+                ch = ((raw[6] & A2DP_OPUS_ANDROID_CHANNEL_MODE_MASK) ==
+                      A2DP_OPUS_ANDROID_CHANNEL_MODE_MONO) ? 1 : 2;
+                ESP_LOGI(BT_AV_TAG, "Detected Android Opus codec sr=%u bits=%u ch=%u cfg=0x%02X",
+                         sr, bits, ch, raw[6]);
             } else {
                 sr = 48000; bits = 32;
                 ESP_LOGI(BT_AV_TAG, "Unknown vendor codec vendorId=0x%08X codecId=0x%04X", vendorId, codecId);
