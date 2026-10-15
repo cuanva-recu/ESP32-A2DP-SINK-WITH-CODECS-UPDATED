@@ -572,7 +572,7 @@ inline DSPProcessor::DSPProcessor()
     , m_lpState(0.0f)
     , m_bassBoostEnabled(false)
     , m_channelFlipEnabled(false)
-    , m_bypassEnabled(false)
+    , m_bypassEnabled(true)  // full-range stereo until NVS settings apply
     , m_analysisEnabled(true)
     , m_analysisDecim(1)
     , m_analysisDecimCount(0)

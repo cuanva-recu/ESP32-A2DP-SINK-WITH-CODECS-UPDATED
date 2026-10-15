@@ -13,6 +13,19 @@
 
 class NVSSettings {
 public:
+    // Control byte bits
+    static constexpr uint8_t CTRL_BASS_BOOST   = 0x01;
+    static constexpr uint8_t CTRL_CHANNEL_FLIP = 0x02;
+    static constexpr uint8_t CTRL_BYPASS       = 0x04;
+
+    // Default: bypass on, i.e. full-range stereo. The split-ear crossover
+    // (left low-pass, right high-pass) is opt-in.
+    static constexpr uint8_t DEFAULT_CONTROL_BYTE = CTRL_BYPASS;
+
+    // Version 1 made bypass the default; older stored control bytes are
+    // migrated once so existing devices also switch to full-range stereo.
+    static constexpr uint8_t CTRL_VERSION = 1;
+
     // Settings structure
     struct Settings {
         std::string deviceName;
@@ -23,7 +36,7 @@ public:
 
         Settings() 
             : deviceName(APP_DEFAULT_DEVICE_NAME)
-            , controlByte(0)
+            , controlByte(DEFAULT_CONTROL_BYTE)
             , eqBassDB(0)
             , eqMidDB(0)
             , eqTrebleDB(0) 
@@ -57,9 +70,9 @@ public:
     // Save control flags
     bool saveControl(bool bassBoost, bool channelFlip, bool bypass) {
         uint8_t ctrl = 0;
-        if (bassBoost) ctrl |= 0x01;
-        if (channelFlip) ctrl |= 0x02;
-        if (bypass) ctrl |= 0x04;
+        if (bassBoost) ctrl |= CTRL_BASS_BOOST;
+        if (channelFlip) ctrl |= CTRL_CHANNEL_FLIP;
+        if (bypass) ctrl |= CTRL_BYPASS;
         m_settings.controlByte = ctrl;
         return saveControl(ctrl);
     }
@@ -87,7 +100,18 @@ public:
         // Control byte
         uint8_t ctrl = 0;
         if (nvs_get_u8(h, NVS_KEY_CTRL, &ctrl) == ESP_OK) {
+            uint8_t ver = 0;
+            nvs_get_u8(h, NVS_KEY_CTRL_VER, &ver);
+            if (ver < CTRL_VERSION) {
+                ctrl |= CTRL_BYPASS;
+                nvs_set_u8(h, NVS_KEY_CTRL, ctrl);
+                nvs_set_u8(h, NVS_KEY_CTRL_VER, CTRL_VERSION);
+                nvs_commit(h);
+                ESP_LOGI(TAG, "Migrated control byte: bypass now on by default");
+            }
             settings.controlByte = ctrl;
+        } else {
+            settings.controlByte = DEFAULT_CONTROL_BYTE;
         }
 
         // EQ
@@ -109,6 +133,7 @@ public:
         nvs_handle_t h;
         if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
         nvs_set_u8(h, NVS_KEY_CTRL, ctrl);
+        nvs_set_u8(h, NVS_KEY_CTRL_VER, CTRL_VERSION);
         nvs_commit(h);
         nvs_close(h);
         return true;

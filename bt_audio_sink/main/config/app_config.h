@@ -46,6 +46,7 @@
 #define NVS_NAMESPACE           "audio"
 #define NVS_KEY_DEVNAME         "devname"
 #define NVS_KEY_CTRL            "ctrl"
+#define NVS_KEY_CTRL_VER        "ctrl_ver"
 #define NVS_KEY_EQ_BASS         "eq_bass"
 #define NVS_KEY_EQ_MID          "eq_mid"
 #define NVS_KEY_EQ_TREB         "eq_treb"
