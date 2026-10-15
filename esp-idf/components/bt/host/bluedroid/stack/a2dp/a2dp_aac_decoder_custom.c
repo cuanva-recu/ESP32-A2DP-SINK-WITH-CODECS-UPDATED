@@ -26,6 +26,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "stack/a2dp_decoder_arena.h"
 
 #define TAG "A2DP_AAC_CUSTOM"
 
@@ -36,7 +37,7 @@
 typedef struct {
     bool initialized;
     latm_parser_t latm;
-    aac_decoder_t *decoder;  /* Allocated from internal RAM */
+    aac_decoder_t *decoder;  /* Allocated from the shared decoder arena */
     
     /* Callback to deliver decoded PCM */
     decoded_data_callback_t decode_callback;
@@ -105,24 +106,21 @@ bool a2dp_aac_decoder_init(decoded_data_callback_t decode_callback)
         osi_mutex_new(&s_mutex);
     }
     
-    /* Allocate decoder from internal RAM */
-    s_decoder.decoder = (aac_decoder_t *)heap_caps_malloc(
-        sizeof(aac_decoder_t),
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-    );
+    /* Allocate decoder from the shared decoder arena */
+    s_decoder.decoder = (aac_decoder_t *)a2dp_dec_arena_malloc(sizeof(aac_decoder_t));
     
     if (!s_decoder.decoder) {
         ESP_LOGE(TAG, "Failed to allocate decoder (%u bytes)", sizeof(aac_decoder_t));
         return false;
     }
     
-    ESP_LOGI(TAG, "Decoder allocated: %u bytes internal RAM", sizeof(aac_decoder_t));
+    ESP_LOGI(TAG, "Decoder allocated: %u bytes", sizeof(aac_decoder_t));
     
     /* Initialize decoder */
     int err = aac_decoder_init(s_decoder.decoder);
     if (err != AAC_OK) {
         ESP_LOGE(TAG, "Decoder init failed: %d", err);
-        heap_caps_free(s_decoder.decoder);
+        a2dp_dec_arena_free(s_decoder.decoder);
         s_decoder.decoder = NULL;
         return false;
     }
@@ -132,14 +130,12 @@ bool a2dp_aac_decoder_init(decoded_data_callback_t decode_callback)
     
     /* Allocate PCM output buffer (1 frame worth - 1024 samples stereo) */
     s_decoder.pcm_buffer_size = 1024 * 2 * sizeof(int16_t);
-    s_decoder.pcm_buffer = (int16_t *)heap_caps_malloc(
-        s_decoder.pcm_buffer_size,
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-    );
+    s_decoder.pcm_buffer = (int16_t *)a2dp_dec_arena_malloc(s_decoder.pcm_buffer_size);
     
     if (!s_decoder.pcm_buffer) {
         ESP_LOGE(TAG, "Failed to allocate PCM buffer");
-        heap_caps_free(s_decoder.decoder);
+        aac_decoder_deinit(s_decoder.decoder);
+        a2dp_dec_arena_free(s_decoder.decoder);
         s_decoder.decoder = NULL;
         return false;
     }
@@ -168,12 +164,13 @@ void a2dp_aac_decoder_cleanup(void)
     }
     
     if (s_decoder.pcm_buffer) {
-        heap_caps_free(s_decoder.pcm_buffer);
+        a2dp_dec_arena_free(s_decoder.pcm_buffer);
         s_decoder.pcm_buffer = NULL;
     }
     
     if (s_decoder.decoder) {
-        heap_caps_free(s_decoder.decoder);
+        aac_decoder_deinit(s_decoder.decoder);
+        a2dp_dec_arena_free(s_decoder.decoder);
         s_decoder.decoder = NULL;
     }
     

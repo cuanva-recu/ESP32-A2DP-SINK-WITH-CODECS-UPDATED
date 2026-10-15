@@ -361,6 +361,7 @@ if(CONFIG_BT_ENABLED)
                    "host/bluedroid/stack/a2dp/a2d_sbc.c"
                    "host/bluedroid/stack/a2dp/a2d_sbc_decoder.c"
                    "host/bluedroid/stack/a2dp/a2dp_codec_config.c"
+                   "host/bluedroid/stack/a2dp/a2dp_decoder_arena.c"
                    "host/bluedroid/stack/a2dp/a2dp_vendor.c"
                    "host/bluedroid/stack/avct/avct_api.c"
                    "host/bluedroid/stack/avct/avct_ccb.c"
@@ -980,6 +981,9 @@ if(CONFIG_BT_A2DP_APTX_DECODER)
     list(APPEND priv_include_dirs host/bluedroid/external/libfreeaptx/main)
     list(APPEND aptx_dec_srcs "host/bluedroid/external/libfreeaptx/main/freeaptx.c")
     list(APPEND srcs ${aptx_dec_srcs})
+    # Route libfreeaptx allocations to the shared A2DP decoder arena
+    set_source_files_properties(${aptx_dec_srcs} PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_LIST_DIR}/host/bluedroid/stack/include/stack/a2dp_decoder_arena_redirect.h")
 
     list(APPEND srcs "host/bluedroid/stack/a2dp/a2dp_vendor_aptx.c"
                      "host/bluedroid/stack/a2dp/a2dp_vendor_aptx_hd.c"
@@ -993,6 +997,9 @@ if(CONFIG_BT_A2DP_LDAC_DECODER)
     list(APPEND ldacbt_dec_srcs "host/bluedroid/external/libldac-dec/src/ldacBT.c"
                                 "host/bluedroid/external/libldac-dec/src/ldaclib.c")
     list(APPEND srcs ${ldacbt_dec_srcs})
+    # Route libldac-dec allocations to the shared A2DP decoder arena
+    set_source_files_properties(${ldacbt_dec_srcs} PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_LIST_DIR}/host/bluedroid/stack/include/stack/a2dp_decoder_arena_redirect.h")
 
     list(APPEND srcs "host/bluedroid/stack/a2dp/a2dp_vendor_ldac.c"
                      "host/bluedroid/stack/a2dp/a2dp_vendor_ldacbt_decoder.c")

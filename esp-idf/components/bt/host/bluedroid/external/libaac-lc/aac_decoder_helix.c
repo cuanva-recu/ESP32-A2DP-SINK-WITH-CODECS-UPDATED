@@ -4,8 +4,9 @@
  * Wrapper around the RealNetworks Helix AAC decoder for ESP32.
  * This provides the aac_decoder.h interface using libhelix-aac.
  * 
- * Memory optimization: Uses static pre-allocated buffers to avoid
- * dynamic allocation and reduce memory fragmentation.
+ * Memory optimization: Decoder state is carved from the shared A2DP
+ * decoder arena, so it never touches the heap and only occupies RAM
+ * while AAC is the active codec.
  */
 
 #include <string.h>
@@ -14,6 +15,7 @@
 
 #include "aac_decoder.h"
 #include "esp_log.h"
+#include "stack/a2dp_decoder_arena.h"
 
 /* Include libhelix-aac headers */
 #include "aacdec.h"
@@ -23,20 +25,16 @@
 #define TAG "AAC_HELIX"
 
 /*******************************************************************************
- * Static Memory Pool - Pre-allocated to avoid malloc
- * 
+ * Decoder Memory - taken from the shared A2DP decoder arena
+ *
  * Memory layout:
  *   - AACDecInfo: ~100 bytes
- *   - PSInfoBase: ~26KB (includes coef[2][1024], overlap[2][1024], etc.)
- * 
- * Total: ~27KB static allocation
+ *   - PSInfoBase: ~20KB (includes coef[2][1024], overlap[2][1024], etc.)
  ******************************************************************************/
 
-/* Align to 8 bytes for safety */
 #define HELIX_BUFFER_SIZE (sizeof(AACDecInfo) + sizeof(PSInfoBase) + 64)
 
-/* Static buffer - placed in DRAM */
-static uint8_t s_helix_buffer[HELIX_BUFFER_SIZE] __attribute__((aligned(8)));
+static uint8_t *s_helix_buffer = NULL;
 static HAACDecoder s_helix_dec = NULL;
 static AACFrameInfo s_frame_info = {0};
 static bool s_initialized = false;
@@ -54,21 +52,22 @@ int aac_decoder_init(aac_decoder_t *dec)
     memset(dec, 0, sizeof(aac_decoder_t));
     
     /* Free previous decoder if any */
-    if (s_helix_dec) {
-        s_helix_dec = NULL;
-        s_initialized = false;
+    aac_decoder_deinit(NULL);
+
+    s_helix_buffer = a2dp_dec_arena_calloc(1, HELIX_BUFFER_SIZE);
+    if (!s_helix_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate helix AAC decoder (%u bytes)",
+                 (unsigned)HELIX_BUFFER_SIZE);
+        return AAC_ERR_NOMEM;
     }
-    
-    /* Clear static buffer */
-    memset(s_helix_buffer, 0, sizeof(s_helix_buffer));
-    
-    /* Initialize using pre-allocated buffer */
+
     void *ptr = s_helix_buffer;
-    int size = sizeof(s_helix_buffer);
+    int size = HELIX_BUFFER_SIZE;
     
     s_helix_dec = AACInitDecoderPre(ptr, size);
     if (!s_helix_dec) {
-        ESP_LOGE(TAG, "Failed to init helix AAC decoder (static buffer)");
+        ESP_LOGE(TAG, "Failed to init helix AAC decoder");
+        aac_decoder_deinit(NULL);
         return AAC_ERR_NOMEM;
     }
     
@@ -78,7 +77,7 @@ int aac_decoder_init(aac_decoder_t *dec)
     dec->sample_rate = 44100;
     dec->channels = 2;
     
-    ESP_LOGI(TAG, "Helix AAC decoder initialized (static buffer: %u bytes)", sizeof(s_helix_buffer));
+    ESP_LOGI(TAG, "Helix AAC decoder initialized (arena buffer: %u bytes)", (unsigned)HELIX_BUFFER_SIZE);
     return AAC_OK;
 }
 
@@ -161,7 +160,8 @@ int aac_decoder_decode(aac_decoder_t *dec, const uint8_t *data, int len,
 
 void aac_decoder_deinit(aac_decoder_t *dec)
 {
-    /* Static buffer - no need to free, just mark as uninitialized */
+    a2dp_dec_arena_free(s_helix_buffer);
+    s_helix_buffer = NULL;
     s_helix_dec = NULL;
     s_initialized = false;
     

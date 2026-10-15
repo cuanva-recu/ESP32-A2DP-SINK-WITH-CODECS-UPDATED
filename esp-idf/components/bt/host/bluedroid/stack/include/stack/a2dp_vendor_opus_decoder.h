@@ -34,6 +34,9 @@ extern "C"
 ******************************************************************************/
 bool a2dp_opus_decoder_init(decoded_data_callback_t decode_callback);
 
+/* Log whether the stereo Opus decoder fits the shared decoder arena. */
+void a2dp_opus_decoder_check_arena(void);
+
 /******************************************************************************
 **
 ** Function         a2dp_opus_decoder_cleanup

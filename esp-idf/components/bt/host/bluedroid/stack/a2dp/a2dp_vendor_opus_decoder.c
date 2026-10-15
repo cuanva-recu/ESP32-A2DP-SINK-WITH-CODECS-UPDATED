@@ -24,6 +24,8 @@
 #include "stack/a2dp_vendor_opus_constants.h"
 #include "stack/a2dp_vendor_opus_decoder.h"
 #include "stack/a2dp_vendor_opus.h"
+#include "stack/a2dp_decoder_arena.h"
+#include "esp_log.h"
 #include "opus.h"
 
 #if (defined(OPUS_DEC_INCLUDED) && OPUS_DEC_INCLUDED == TRUE)
@@ -121,6 +123,19 @@ static bool opus_cie_is_supported(const tA2DP_OPUS_CIE *ie)
     }
 }
 
+void a2dp_opus_decoder_check_arena(void)
+{
+    size_t need = a2dp_dec_arena_block_size(
+        (size_t)opus_decoder_get_size(OPUS_A2DP_CHANNEL_MAX));
+    if (need > A2DP_DEC_ARENA_SIZE) {
+        ESP_LOGW("A2D_ARENA", "Opus decoder needs %u bytes, arena is %u: Opus will use the heap",
+                 (unsigned)need, (unsigned)A2DP_DEC_ARENA_SIZE);
+    } else {
+        ESP_LOGI("A2D_ARENA", "Opus decoder needs %u of %u arena bytes",
+                 (unsigned)need, (unsigned)A2DP_DEC_ARENA_SIZE);
+    }
+}
+
 bool a2dp_opus_decoder_init(decoded_data_callback_t decode_callback)
 {
     memset(&a2dp_opus_decoder_cb, 0, sizeof(a2dp_opus_decoder_cb));
@@ -131,9 +146,7 @@ bool a2dp_opus_decoder_init(decoded_data_callback_t decode_callback)
 void a2dp_opus_decoder_cleanup(void)
 {
     tA2DP_OPUS_DECODER_CB *cb = &a2dp_opus_decoder_cb;
-    if (cb->decoder) {
-        opus_decoder_destroy(cb->decoder);
-    }
+    a2dp_dec_arena_free(cb->decoder);
     memset(cb, 0, sizeof(*cb));
 }
 
@@ -141,10 +154,8 @@ void a2dp_opus_decoder_configure(const uint8_t *p_codec_info)
 {
     tA2DP_OPUS_DECODER_CB *cb = &a2dp_opus_decoder_cb;
 
-    if (cb->decoder) {
-        opus_decoder_destroy(cb->decoder);
-        cb->decoder = NULL;
-    }
+    a2dp_dec_arena_free(cb->decoder);
+    cb->decoder = NULL;
     cb->channels = 0;
     cb->fragment_size = 0;
     cb->fragment_count = 0;
@@ -163,10 +174,17 @@ void a2dp_opus_decoder_configure(const uint8_t *p_codec_info)
 
     uint8_t channels = opus_cie_channel_count(&ie);
 
-    int error = OPUS_OK;
-    OpusDecoder *dec = opus_decoder_create(OPUS_A2DP_SAMPLE_RATE, (int)channels, &error);
-    if (error != OPUS_OK || !dec) {
-        APPL_TRACE_ERROR("%s: opus_decoder_create failed: %d", __func__, error);
+    /* Decoder state lives in the shared decoder arena, not the heap. */
+    OpusDecoder *dec = (OpusDecoder *)a2dp_dec_arena_malloc(
+        (size_t)opus_decoder_get_size((int)channels));
+    if (!dec) {
+        APPL_TRACE_ERROR("%s: Opus decoder allocation failed", __func__);
+        return;
+    }
+    int error = opus_decoder_init(dec, OPUS_A2DP_SAMPLE_RATE, (int)channels);
+    if (error != OPUS_OK) {
+        APPL_TRACE_ERROR("%s: opus_decoder_init failed: %d", __func__, error);
+        a2dp_dec_arena_free(dec);
         return;
     }
 

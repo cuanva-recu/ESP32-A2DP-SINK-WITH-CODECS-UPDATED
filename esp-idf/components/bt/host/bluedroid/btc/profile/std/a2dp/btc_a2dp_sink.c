@@ -34,6 +34,10 @@
 #include "osi/future.h"
 #include <assert.h>
 #include "esp_heap_caps.h"  // For heap_caps_get_free_size/largest_free_block
+#include "stack/a2dp_decoder_arena.h"
+#if (defined(OPUS_DEC_INCLUDED) && OPUS_DEC_INCLUDED == TRUE)
+#include "stack/a2dp_vendor_opus_decoder.h"
+#endif
 
 #if (BTC_AV_SINK_INCLUDED == TRUE)
 
@@ -93,9 +97,10 @@ enum {
 #define BTC_A2DP_SNK_DATA_QUEUE_IDX            (1)
 
 #define A2DP_TASK_NAME                   "A2DP_DECODER"
-/* 4KB is sufficient for all codecs (SBC, aptX, LDAC, Opus, LC3plus).
- * Decoders use pre-allocated static context, not deep stack recursion. */
-#define A2DP_TASK_STACK_SIZE             (8192)
+/* Opus is the deepest decoder: it keeps per-frame scratch in VLAs on the
+ * stack. Stereo 20 ms Opus (Android/Google variant) peaked at ~11.2KB on
+ * device; 8KB overflowed. 14KB leaves ~2.9KB headroom for heavier frames. */
+#define A2DP_TASK_STACK_SIZE             (14336)
 #define A2DP_TASK_PRIO                   (BT_TASK_MAX_PRIORITIES - 6)
 #define A2DP_TASK_PINNED_TO_CORE         (1)
 #define A2DP_TASK_WORKQUEUE_NUM          (2)
@@ -597,6 +602,19 @@ static void btc_a2dp_sink_handle_decoder_reset(tBTC_MEDIA_SINK_CFG_UPDATE *p_msg
         btc_a2dp_sink_flush_q(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
     }
 
+    bool decoder_changed = (decoder != a2dp_sink_local_param.decoder);
+
+    // De-initialize the previous decoder and empty the shared decoder arena
+    // before allocating anything for the new codec, so the old decoder's
+    // memory is never split around the new scratch buffer.
+    if (decoder_changed) {
+        if (a2dp_sink_local_param.decoder && a2dp_sink_local_param.decoder->decoder_cleanup) {
+            a2dp_sink_local_param.decoder->decoder_cleanup();
+        }
+        a2dp_sink_local_param.decoder = NULL;
+        a2dp_dec_arena_reset();
+    }
+
     size_t decode_buf_len = btc_a2dp_sink_decode_buf_size(codec_index);
     if (!btc_a2dp_sink_configure_decode_buf(decode_buf_len)) {
         a2dp_sink_local_param.decoder_ready = FALSE;
@@ -604,12 +622,7 @@ static void btc_a2dp_sink_handle_decoder_reset(tBTC_MEDIA_SINK_CFG_UPDATE *p_msg
         return;
     }
 
-    if (decoder != a2dp_sink_local_param.decoder) {
-        // De-initialize previous decoder
-        if (a2dp_sink_local_param.decoder && a2dp_sink_local_param.decoder->decoder_cleanup) {
-            a2dp_sink_local_param.decoder->decoder_cleanup();
-        }
-
+    if (decoder_changed) {
         // Initialize new decoder
         a2dp_sink_local_param.decoder = decoder;
         if (a2dp_sink_local_param.decoder->decoder_init &&
@@ -859,6 +872,9 @@ static void btc_a2dp_sink_thread_init(UNUSED_ATTR void *context)
     memset(&a2dp_sink_local_param.btc_aa_snk_cb, 0, sizeof(a2dp_sink_local_param.btc_aa_snk_cb));
     a2dp_sink_local_param.decoder_ready = FALSE;
     a2dp_sink_local_param.decode_buf = NULL;
+#if (defined(OPUS_DEC_INCLUDED) && OPUS_DEC_INCLUDED == TRUE)
+    a2dp_opus_decoder_check_arena();
+#endif
     a2dp_sink_local_param.decode_buf_len = 0;
     a2dp_sink_local_param.codec_index = BTAV_A2DP_CODEC_INDEX_MAX;
 
@@ -881,6 +897,7 @@ static void btc_a2dp_sink_thread_cleanup(UNUSED_ATTR void *context)
         a2dp_sink_local_param.decoder->decoder_cleanup();
         a2dp_sink_local_param.decoder = NULL;
     }
+    a2dp_dec_arena_reset();
     a2dp_sink_local_param.decoder_ready = FALSE;
 
     btc_a2dp_control_set_datachnl_stat(FALSE);
