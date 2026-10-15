@@ -1,0 +1,20 @@
+# ESP-IDF Partition Table (4MB flash variant),,,,,
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xF000,  0x1000,
+
+# No dedicated recovery partition on 4MB boards - there is not enough room
+# for recovery + two OTA slots + usable SPIFFS. BLE OTA with ota_0/ota_1
+# rollback is the update path. main.cpp falls through to a normal boot when
+# the "recovery" partition is missing.
+
+# Two-partition OTA scheme (4MB flash), 1.5MB each.
+# NOTE: app partition offsets must be 0x10000-aligned.
+ota_0,    app,  ota_0,   0x10000,  0x180000,
+ota_1,    app,  ota_1,   0x190000, 0x180000,
+
+# OTA data (stores boot partition state for rollback)
+otadata,  data, ota,     0x310000, 0x2000,
+
+# Storage partition for sound effects (0x312000 to end of 4MB flash = 952KB)
+spiffs,   data, spiffs,  0x312000, 0xEE000,

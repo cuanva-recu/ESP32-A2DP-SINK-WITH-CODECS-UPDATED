@@ -1,0 +1,8 @@
+# Overrides for 4MB flash boards (e.g. ESP32-WROOM-32 4MB).
+# Build with:
+#   idf.py -B build_4mb -D SDKCONFIG=build_4mb/sdkconfig \
+#     -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.4mb" build
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
