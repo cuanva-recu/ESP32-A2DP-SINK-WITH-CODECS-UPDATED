@@ -97,13 +97,15 @@
  
  // Codec switch detection - to suppress connected sound during rapid codec changes
  static volatile int64_t  g_lastDisconnectTime = 0;     // Timestamp of last disconnect (esp_timer_get_time)
- static const int64_t     CODEC_SWITCH_TIMEOUT_US = 5000000;  // 5 seconds - if reconnect within this, skip connected sound
  
  // Connected sound delay - wait for codec to stabilize before playing
  static volatile int64_t  g_lastCodecConfigTime = 0;    // Timestamp of last codec config
  static volatile bool     g_connectedSoundPending = false;  // True if waiting to play connected sound
  static volatile bool     g_disconnectSoundPending = false; // True if waiting to play disconnect sound
+ // A link that drops and comes back within this window is the same session
+ // (codec switch or codec fallback); one that stays down longer has ended.
  static const int64_t     DISCONNECT_SOUND_DELAY_US = 1500000;  // 1.5s - codec switches reconnect well within this
+ static volatile bool     g_connectionAnnounced = false;    // Connect sound already handled for this session
  static const int64_t     CODEC_STABLE_DELAY_US = 400000;   // 400ms - wait this long after last codec config
  
  // Connection timestamp - to ignore initial volume report from phone
@@ -1643,8 +1645,10 @@
          // Record disconnect time for codec switch detection
          g_lastDisconnectTime = esp_timer_get_time();
          
-         // Cancel any pending connected sound
-         g_connectedSoundPending = false;
+         // Keep any pending connected sound: sources such as Android often
+         // connect with one codec and reconnect with another within ~100 ms.
+         // It plays once the link is back and stable, or is dropped when the
+         // session ends (see buttonsTask).
          
          ESP_LOGW(TAG, "A2DP disconnected - waiting for phone to reconnect with new codec...");
          g_pipeline.clear();
@@ -1678,13 +1682,10 @@
          // Record connection time - used to ignore initial volume report from phone
          g_lastConnectTime = esp_timer_get_time();
          
-         // Check if this is a rapid reconnect (codec switch) - don't play connected sound
-         int64_t timeSinceDisconnect = esp_timer_get_time() - g_lastDisconnectTime;
-         bool isCodecSwitch = (g_lastDisconnectTime > 0) && (timeSinceDisconnect < CODEC_SWITCH_TIMEOUT_US);
-         
-         if (isCodecSwitch) {
-             ESP_LOGI(TAG, "Codec switch detected (reconnect in %lld ms) - skipping connected sound", 
-                      timeSinceDisconnect / 1000);
+         // A reconnect within an already-announced session is a codec switch
+         if (g_connectionAnnounced) {
+             ESP_LOGI(TAG, "Codec switch detected (reconnect in %lld ms) - skipping connected sound",
+                      (esp_timer_get_time() - g_lastDisconnectTime) / 1000);
          }
          
          // Clear pairing mode flag - we're now connected
@@ -1765,17 +1766,16 @@
      while (true) {
          uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
          
-         // Check if connected sound is pending and codec has stabilized
-         if (g_connectedSoundPending) {
+         // Check if connected sound is pending and the link is up with a stable
+         // codec. While the link is down (e.g. mid codec fallback) keep waiting.
+         if (g_connectedSoundPending && g_a2dpConnected) {
              int64_t timeSinceCodecConfig = esp_timer_get_time() - g_lastCodecConfigTime;
              if (timeSinceCodecConfig >= CODEC_STABLE_DELAY_US) {
                  g_connectedSoundPending = false;
+                 bool alreadyAnnounced = g_connectionAnnounced;
+                 g_connectionAnnounced = true;
                  
-                 // Check if this is a codec switch (rapid reconnect) - don't play sound
-                 int64_t timeSinceDisconnect = g_lastCodecConfigTime - g_lastDisconnectTime;
-                 bool isCodecSwitch = (g_lastDisconnectTime > 0) && (timeSinceDisconnect < CODEC_SWITCH_TIMEOUT_US);
-                 
-                 if (isCodecSwitch) {
+                 if (alreadyAnnounced) {
                      ESP_LOGI(TAG, "Codec switch detected - skipping connected sound");
                  } else if (g_a2dpConnected && g_pipeline.isAudioActive()) {
                      ESP_LOGI(TAG, "A2DP stream already active - skipping connected sound to protect audio startup");
@@ -1799,9 +1799,15 @@
              g_disconnectSoundPending = false;
              if (g_a2dpConnected) {
                  // Reconnected in the meantime - nothing to announce
+             } else if (!g_connectionAnnounced) {
+                 // Session ended before its connect sound - stay silent
+                 g_connectedSoundPending = false;
+                 ESP_LOGI(TAG, "Connection ended before it was announced - skipping disconnect sound");
              } else if (g_pairingModeActive) {
+                 g_connectionAnnounced = false;
                  ESP_LOGI(TAG, "Pairing mode active - skipping disconnect sound");
              } else {
+                 g_connectionAnnounced = false;
                  ESP_LOGI(TAG, "A2DP link down for %lld ms - playing disconnect sound at %u Hz",
                           (esp_timer_get_time() - g_lastDisconnectTime) / 1000,
                           (unsigned)g_i2s.getSampleRate());
