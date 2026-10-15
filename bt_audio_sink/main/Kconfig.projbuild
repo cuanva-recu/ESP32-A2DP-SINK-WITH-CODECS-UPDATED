@@ -139,7 +139,7 @@ menu "A2DP DSP BLE Configuration"
     menu "Device Settings"
         config DEFAULT_DEVICE_NAME
             string "Default Bluetooth device name"
-            default "BDK SPEAKER"
+            default "PIONEER SK-21F"
             help
                 Default name for Bluetooth advertising.
 
