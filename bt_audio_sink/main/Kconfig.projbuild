@@ -54,6 +54,15 @@ menu "A2DP DSP BLE Configuration"
     endmenu
 
     menu "DSP Configuration"
+        config AUDIO_ANALYSIS_ENABLE
+            bool "Enable audio analysis (beat LED, LED matrix, BLE meters)"
+            default y
+            help
+                Runs beat detection and level metering on every rendered sample.
+                Only the beat LED, the LED matrix and the BLE level meters use it;
+                disable it when none of those are needed to save CPU on the
+                audio render path (most noticeable at 88.2/96 kHz).
+
         config DSP_GOERTZEL_N
             int "Goertzel block size (samples)"
             default 512

@@ -1486,7 +1486,7 @@
      // Analysis runs at every sample rate now: the Goertzel is fixed-point and
      // its window scales with fs, so 88.2/96 kHz cost the same per-window work as
      // 44.1/48 kHz and stay well within the render headroom (no underruns).
-     g_dsp.setAnalysisEnabled(true);
+     g_dsp.setAnalysisEnabled(APP_AUDIO_ANALYSIS_ENABLED);
  
      g_lastCodecConfigTime = cfg.timestampUs;
      g_connectedSoundPending = true;
@@ -2085,6 +2085,7 @@
      g_dsp.setBassBoost(bassBoost);
      g_dsp.setChannelFlip(channelFlip);
      g_dsp.setBypass(bypass);
+     g_dsp.setAnalysisEnabled(APP_AUDIO_ANALYSIS_ENABLED);
  
      logHeap("after_dsp");
  
@@ -2369,7 +2370,9 @@
               (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
  
      xTaskCreatePinnedToCore(buttonsTask, "buttons", 3072, nullptr, 3, nullptr, 0);
-     xTaskCreatePinnedToCore(beatTask, "beat", 2048, nullptr, 2, nullptr, 0);
+     if (APP_AUDIO_ANALYSIS_ENABLED) {
+         xTaskCreatePinnedToCore(beatTask, "beat", 2048, nullptr, 2, nullptr, 0);
+     }
  
      // Initialize and start encoder task
      #ifdef CONFIG_ENCODER_ENABLE

@@ -1,0 +1,8 @@
+# Overrides for boards with no LED matrix, rotary encoder or beat LED.
+# Frees CPU on the audio render core and ~6 KB of internal RAM.
+# Layer it on top of the other defaults, e.g. for a 4MB board:
+#   idf.py -B build_4mb -D SDKCONFIG=build_4mb/sdkconfig \
+#     -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.4mb;sdkconfig.defaults.headless" build
+# CONFIG_LED_MATRIX_ENABLE is not set
+# CONFIG_ENCODER_ENABLE is not set
+# CONFIG_AUDIO_ANALYSIS_ENABLE is not set
