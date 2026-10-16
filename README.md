@@ -87,6 +87,7 @@ The `main` branch is designed for internal RAM operation on common ESP32-WROOM b
   - Division-free biquad filters using ESP32 hardware reciprocal approximations.
 - **Q1.31 stereo ring buffer** with software ASRC and A2DP backpressure.
 - **Overlay mixer** for startup, pairing, connected, and max-volume sound effects.
+- **Line-level volume on connect:** each new connection starts at about 1 Vrms full scale, and the source's volume slider follows (see [Connect Volume](#connect-volume)).
 
 ### Visual
 
@@ -287,6 +288,22 @@ Then open **A2DP DSP BLE Configuration** to configure:
 - Rotary encoder I2C pins and address.
 - Device name and firmware version.
 - Audio buffer pool count and size.
+
+### Connect Volume
+
+`CONFIG_CONNECT_VOLUME` (under **DSP Configuration**) sets the volume applied when a source connects, so the output starts at line level for an amplifier's aux input. The value is Bluetooth absolute volume (0-127), applied as a linear gain of `volume / 127`. With the PCM5102A's 2.1 Vrms full-scale output:
+
+| `CONFIG_CONNECT_VOLUME` | Gain | Full-scale output |
+|---:|---:|---:|
+| 127 | 0 dB | 2.1 Vrms (CD-player level) |
+| 60 (default) | -6.5 dB | About 1 Vrms |
+| 19 | -16.5 dB | About 0.32 Vrms (-10 dBV) |
+| -1 | - | Disabled; the source's own volume is kept |
+
+- Phones and PCs restore their saved volume a few seconds after connecting, once AVRCP is up. The first volume the source sends within 15 s of connecting is replaced with the connect volume, and the source is notified so its slider moves to match.
+- Sources map 0-127 to their own slider curve, so the slider may not sit at the same fraction as the gain. For example, one Android phone showed volume 60 at about a third of its slider.
+- Codec-switch reconnects within a session keep the volume the user has set.
+- The volume-based bass compensation still applies below full volume, adding about +1.4 dB below 100 Hz at the default of 60.
 
 ## Project Structure
 
