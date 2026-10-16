@@ -111,6 +111,11 @@
  // Connection timestamp - to ignore initial volume report from phone
  static volatile int64_t  g_lastConnectTime = 0;        // Timestamp of last A2DP connection
  static const int64_t     VOLUME_GRACE_PERIOD_US = 2000000;  // 2 seconds - ignore volume changes after connection
+ // Connect volume: the first volume a source sends after connecting (its saved
+ // level, often several seconds later once AVRCP is up) is replaced by APP_CONNECT_VOLUME
+ static volatile bool     g_holdConnectVolume = false;
+ static volatile int64_t  g_holdConnectVolumeUntil = 0;
+ static const int64_t     CONNECT_VOLUME_HOLD_US = 15000000;  // 15 s
  static volatile bool     g_a2dpConnected = false;      // True when A2DP is in CONNECTED state
  
  // Max volume sound rate limiting - prevent crash from spamming
@@ -1686,6 +1691,15 @@
          if (g_connectionAnnounced) {
              ESP_LOGI(TAG, "Codec switch detected (reconnect in %lld ms) - skipping connected sound",
                       (esp_timer_get_time() - g_lastDisconnectTime) / 1000);
+             g_holdConnectVolume = false;  // keep the volume the user has set since
+         } else if (APP_CONNECT_VOLUME >= 0) {
+             // New session: start at line level. The source's volume slider
+             // follows via the AVRCP volume notification; any volume the source
+             // sends during the grace period is overridden (see volume callback).
+             ESP_LOGI(TAG, "New connection - setting volume to %d", APP_CONNECT_VOLUME);
+             g_holdConnectVolume = true;
+             g_holdConnectVolumeUntil = esp_timer_get_time() + CONNECT_VOLUME_HOLD_US;
+             g_a2dp.set_volume(APP_CONNECT_VOLUME);
          }
          
          // Clear pairing mode flag - we're now connected
@@ -2305,6 +2319,17 @@
      g_a2dp.set_on_connection_state_changed(onConnectionState);
      g_a2dp.set_on_audio_state_changed(onAudioState);
      
+     // Volume set by the source: replace its first (restored) volume after connecting
+     g_a2dp.set_avrc_rn_volumechange_completed([](int volume) {
+         if (!g_holdConnectVolume) return;
+         g_holdConnectVolume = false;
+         if (esp_timer_get_time() < g_holdConnectVolumeUntil && volume != APP_CONNECT_VOLUME) {
+             ESP_LOGI(TAG, "Overriding source volume %d with connect volume %d",
+                      volume, APP_CONNECT_VOLUME);
+             g_a2dp.set_volume(APP_CONNECT_VOLUME);
+         }
+     });
+
      // Volume change callback - sync with LED and encoder controller
      g_a2dp.set_avrc_rn_volumechange([](int volume) {
          g_dsp.setVolume((uint8_t)volume);

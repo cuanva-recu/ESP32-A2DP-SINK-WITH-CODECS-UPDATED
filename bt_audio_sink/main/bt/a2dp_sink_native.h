@@ -105,6 +105,11 @@ private:
     _lock_t s_volume_lock;
     uint8_t s_volume = 0;
     bool s_volume_notify = false;
+    // A local change the source has not been told about (it was not registered
+    // for notifications); reported on its next registration
+    bool s_volume_change_pending = false;
+    static constexpr uint8_t VOLUME_UNKNOWN = 0xFF;
+    uint8_t s_volume_source = VOLUME_UNKNOWN;   // last volume the source set or was told
 
     // Connection
     esp_a2d_connection_state_t connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;

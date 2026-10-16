@@ -318,14 +318,39 @@ void NativeA2DPSink::rc_tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param
 void NativeA2DPSink::av_hdl_avrc_tg_evt(uint16_t event, void *p_param) {
     esp_avrc_tg_cb_param_t *rc = (esp_avrc_tg_cb_param_t*)p_param;
     switch (event) {
+    case ESP_AVRC_TG_CONNECTION_STATE_EVT:
+        ESP_LOGI(BT_RC_TG_TAG, "AVRCP target %s", rc->conn_stat.connected ? "connected" : "disconnected");
+        if (!rc->conn_stat.connected) {
+            s_volume_notify = false;
+            s_volume_change_pending = false;
+            s_volume_source = VOLUME_UNKNOWN;
+        }
+        break;
     case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
+        ESP_LOGI(BT_RC_TG_TAG, "source set absolute volume %d", rc->set_abs_vol.volume);
         volume_set_by_controller(rc->set_abs_vol.volume);
         break;
     case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT:
         if (rc->reg_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
-            s_volume_notify = true;
-            esp_avrc_rn_param_t rn_param; rn_param.volume = s_volume;
-            esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+            esp_avrc_rn_param_t rn_param;
+            if (s_volume_change_pending && s_volume_source != VOLUME_UNKNOWN) {
+                // Report the volume the source knows, then the local change, so
+                // the source treats it like a volume key press on the sink
+                ESP_LOGI(BT_RC_TG_TAG, "source registered for volume notifications, sending pending change %d -> %d",
+                         s_volume_source, s_volume);
+                s_volume_change_pending = false;
+                rn_param.volume = s_volume_source;
+                esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+                rn_param.volume = s_volume_source = s_volume;
+                esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_CHANGED, &rn_param);
+            } else {
+                ESP_LOGI(BT_RC_TG_TAG, "source registered for volume notifications, reporting %d", s_volume);
+                s_volume_change_pending = false;
+                s_volume_source = s_volume;
+                s_volume_notify = true;
+                rn_param.volume = s_volume;
+                esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+            }
         }
         break;
     default: break;
@@ -353,6 +378,8 @@ int  NativeA2DPSink::get_volume()  { _lock_acquire(&s_volume_lock); int v=s_volu
 
 void NativeA2DPSink::volume_set_by_controller(uint8_t volume) {
     _lock_acquire(&s_volume_lock); s_volume = volume; _lock_release(&s_volume_lock);
+    s_volume_source = volume;
+    s_volume_change_pending = false;
     if (volumechange_cb) volumechange_cb(volume);
     if (s_volume_notify) {
         esp_avrc_rn_param_t rn_param; rn_param.volume = s_volume;
@@ -365,10 +392,15 @@ void NativeA2DPSink::volume_set_by_controller(uint8_t volume) {
 void NativeA2DPSink::volume_set_by_local_host(uint8_t volume) {
     _lock_acquire(&s_volume_lock); s_volume = volume; _lock_release(&s_volume_lock);
     if (volumechange_cb) volumechange_cb(volume);
+    ESP_LOGI(BT_RC_TG_TAG, "local volume %d, %s", volume,
+             s_volume_notify ? "notifying source" : "source told on next registration");
     if (s_volume_notify) {
         esp_avrc_rn_param_t rn_param; rn_param.volume = s_volume;
         esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_CHANGED, &rn_param);
         s_volume_notify = false;
+        s_volume_source = volume;
+    } else {
+        s_volume_change_pending = true;
     }
 }
 
