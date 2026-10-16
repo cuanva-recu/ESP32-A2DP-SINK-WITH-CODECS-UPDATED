@@ -353,6 +353,11 @@ void btm_acl_created (BD_ADDR bda, DEV_CLASS dc, UINT8 bdn[BTM_MAX_REM_BD_NAME_L
                     /* If remote features indicated secure connection (SC) mode, check the remote features again*/
                     /* this is to prevent from BIAS attack where attacker can downgrade SC mode*/
                     btm_read_remote_features (p->hci_handle);
+                    /* Done: falling through read the features a second time, doubling
+                     * the LMP traffic (features, extended features, packet type) just
+                     * as the source authenticates. The ESP32 controller can then lose
+                     * the source's LMP challenge and the connection stalls. */
+                    return;
                 }
             }
 

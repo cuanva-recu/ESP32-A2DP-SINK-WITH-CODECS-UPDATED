@@ -5220,8 +5220,14 @@ static tBTM_STATUS btm_sec_execute_procedure (tBTM_SEC_DEV_REC *p_dev_rec)
         return (BTM_CMD_STARTED);
     }
 
-    /* If any security is required, get the name first */
+    /* If any security is required, get the name first.
+     * Only then: the name was also requested when nothing is required, e.g.
+     * right after an incoming link comes up. Bonded devices are loaded without
+     * their name, so after a reboot that request went out just as the source
+     * started authentication, and the ESP32 controller could lose the source's
+     * LMP challenge (no Link Key Request, the source's L2CAP connect times out). */
     if (!(p_dev_rec->sec_flags & BTM_SEC_NAME_KNOWN)
+            && (p_dev_rec->security_required != BTM_SEC_NONE)
             && (p_dev_rec->hci_handle != BTM_SEC_INVALID_HANDLE)) {
         BTM_TRACE_EVENT ("Security Manager: Start get name\n");
         if (!btm_sec_start_get_name (p_dev_rec)) {
