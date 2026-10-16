@@ -138,16 +138,47 @@ PSRAM is not required for the `main` branch.
 
 | Codec | Max bitrate | Sample rate | Bit depth / output | Status |
 |---|---:|---:|---|---|
-| LDAC | 990 kbps | Up to 96 kHz | 24-bit output | Supported |
-| aptX-HD | 576 kbps | 48 kHz | 24-bit output | Supported |
-| aptX | 352 kbps | 48 kHz | 16-bit output | Supported |
-| aptX-LL | 352 kbps | 48 kHz | 16-bit output | Supported |
-| Opus | Codec-dependent | 48 kHz | 16-bit output | Supported |
-| AAC | 256 kbps | 48 kHz | 16-bit output | Supported |
-| SBC | 328 kbps | 48 kHz | 16-bit output | Supported |
+| LDAC | 990 kbps | 44.1 / 48 / 88.2 / 96 kHz | 24-bit output | Supported |
+| aptX-HD | 576 kbps | 44.1 / 48 kHz | 24-bit output | Supported |
+| aptX | 384 kbps | 44.1 / 48 kHz | 16-bit output | Supported |
+| aptX-LL | 384 kbps | 48 kHz | 16-bit output | Supported |
+| Opus | 256 kbps (source-dependent) | 48 kHz | 16-bit output | Supported |
+| AAC | 320 kbps (VBR, negotiated) | 44.1 / 48 kHz | 16-bit output | Supported |
+| SBC | ~390 kbps, ~505 kbps SBC-XQ | 44.1 / 48 kHz | 16-bit output | Supported |
 | LC3 / LC3plus | N/A | N/A | N/A | Not available for Bluetooth Classic A2DP |
 
 LC3 is not listed as an available A2DP codec because LC3 is used for Bluetooth LE Audio over BLE. This project is a Bluetooth Classic A2DP sink, so LC3 is not available in this playback path.
+
+### Measured Results
+
+Every codec was tested on an ESP32-D0WDQ6 with a PCM5102A DAC, by streaming
+test tones (Linux PC with PipeWire; AAC from an Android phone) and recording
+the DAC output through a USB audio interface. Bitrates and decoded frame
+rates were measured on the board.
+
+| Codec / mode | Measured bitrate | Decoded rates | Loopback clicks |
+|---|---|---|---|
+| LDAC HQ | 991 kbps at 48 / 96 kHz, ~910 kbps at 44.1 / 88.2 kHz | 44.1, 48, 88.2, 96 kHz | 0 in 7 x 60 s at 96 kHz |
+| LDAC SQ / MQ | 607-660 kbps / 303-330 kbps | 44.1, 48, 88.2, 96 kHz | Not retested with the jitter buffer |
+| aptX-HD | 575 kbps at 48 kHz, 528 kbps at 44.1 kHz | 44.1, 48 kHz | 0 in 60 s |
+| aptX | 379 kbps at 48 kHz, 348 kbps at 44.1 kHz | 44.1, 48 kHz | 0 in short runs |
+| aptX-LL | 371 kbps | 48 kHz | 0 in short runs |
+| SBC / SBC-XQ | 387-389 kbps / 504-507 kbps | 44.1, 48 kHz | 0 in 60 s (SBC) / short runs (XQ) |
+| Opus (PipeWire "Opus 05") | 209 kbps | 48 kHz | 0 in short runs |
+| Opus (Android) | 256 kbps | 48 kHz | 0 in 60 s |
+| AAC-LC | 205-253 kbps with music (VBR, up to 320 kbps) | 44.1 kHz | 0 in short runs |
+
+- The decoded frame rate matched the negotiated sample rate within 0.3% in
+  every case, with no dropped packets or decode failures.
+- AAC at 48 kHz was not tested because the test phone always chose 44.1 kHz.
+- Short runs were about 10 s. Clicks were detected from level dips and phase
+  jumps in the recorded tones. Before the 40 ms encoded-packet jitter buffer was added, LDAC 96 kHz HQ
+  clicked up to 24 times a minute, and other high-bitrate modes about once or
+  twice a minute.
+- Idle and streaming noise floor: about -83.5 dBFS (20 Hz-20 kHz) with the
+  board on battery power, limited by the recording interface. With the
+  board's USB also plugged into the recording PC, a ground loop raised it to
+  about -52 dBFS.
 
 ## Building
 
@@ -331,10 +362,18 @@ AAC does not require PSRAM in this branch. If initialization fails, check that t
 
 ### Audio stutters at LDAC 96 kHz
 
+- LDAC 96 kHz at 990 kbps runs the Bluetooth link near capacity. The sink holds
+  40 ms of encoded packets after each stream start to absorb late packets; make
+  sure your build includes this change in `btc_a2dp_sink.c`.
 - Confirm that `CONFIG_FREERTOS_HZ=1000` is set.
-- Reduce BLE meter update rate if needed.
-- Check that the source device is not forcing an unstable radio condition.
+- Avoid UART logging while streaming LDAC 96 kHz.
 - Keep the ESP32 close to the source device during testing.
+
+### Hum or noise when connected to a PC
+
+If the board's USB port and the audio recording or playback device share a PC,
+the ground loop can add hum and tones around -52 dBFS. Power the board from a
+battery or separate supply, or use a USB isolator.
 
 ## Compatibility
 
