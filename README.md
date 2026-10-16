@@ -159,8 +159,8 @@ rates were measured on the board.
 
 | Codec / mode | Measured bitrate | Decoded rates | Loopback clicks |
 |---|---|---|---|
-| LDAC HQ | 991 kbps at 48 / 96 kHz, ~910 kbps at 44.1 / 88.2 kHz | 44.1, 48, 88.2, 96 kHz | 0 in 7 x 60 s at 96 kHz |
-| LDAC SQ / MQ | 607-660 kbps / 303-330 kbps | 44.1, 48, 88.2, 96 kHz | Not retested with the jitter buffer |
+| LDAC HQ | 991 kbps at 48 / 96 kHz, ~910 kbps at 44.1 / 88.2 kHz | 44.1, 48, 88.2, 96 kHz | 0 in 7 x 60 s at 96 kHz; 1 in 2 x 60 s at 48 kHz |
+| LDAC SQ / MQ | 607-660 kbps / 303-330 kbps | 44.1, 48, 88.2, 96 kHz | 0 in 60 s at each rate |
 | aptX-HD | 575 kbps at 48 kHz, 528 kbps at 44.1 kHz | 44.1, 48 kHz | 0 in 60 s |
 | aptX | 379 kbps at 48 kHz, 348 kbps at 44.1 kHz | 44.1, 48 kHz | 0 in short runs |
 | aptX-LL | 371 kbps | 48 kHz | 0 in short runs |
@@ -172,10 +172,13 @@ rates were measured on the board.
 - The decoded frame rate matched the negotiated sample rate within 0.3% in
   every case, with no dropped packets or decode failures.
 - AAC at 48 kHz was not tested because the test phone always chose 44.1 kHz.
-- Short runs were about 10 s. Clicks were detected from level dips and phase
-  jumps in the recorded tones. Before the 40 ms encoded-packet jitter buffer was added, LDAC 96 kHz HQ
-  clicked up to 24 times a minute, and other high-bitrate modes about once or
-  twice a minute.
+- Short runs were about 10 s. Clicks were detected as bursts of energy above
+  4 kHz in 1 ms windows of the recorded 1 kHz / 1.5 kHz tones, which catches
+  dropouts as short as 0.1 ms. Before the 40 ms encoded-packet jitter buffer
+  was added, LDAC 96 kHz HQ clicked up to 24 times a minute, and other
+  high-bitrate modes about once or twice a minute. With it, one isolated click
+  remained in about 22 minutes of 60 s runs (LDAC 48 kHz HQ), with no buffer
+  underrun on the board at the time.
 - Idle and streaming noise floor: about -83.5 dBFS (20 Hz-20 kHz) with the
   board on battery power, limited by the recording interface. With the
   board's USB also plugged into the recording PC, a ground loop raised it to
