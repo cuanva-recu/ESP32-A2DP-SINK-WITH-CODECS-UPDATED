@@ -83,7 +83,7 @@ The `main` branch is designed for internal RAM operation on common ESP32-WROOM b
   - 3-band parametric EQ for bass, mid, and treble.
   - Crossover split-ear mode with low-pass and high-pass routing.
   - Bass boost shelf and volume-based bass compensation.
-  - Soft-clip limiter for zero-latency output protection.
+  - Soft-clip limiter for zero-latency output protection: transparent below 0.95 of full scale (-0.45 dBFS, after volume), smoothly saturating above it so the output never exceeds full scale.
   - Division-free biquad filters using ESP32 hardware reciprocal approximations.
 - **Q1.31 stereo ring buffer** with software ASRC and A2DP backpressure.
 - **Overlay mixer** for startup, pairing, connected, and max-volume sound effects.
@@ -180,6 +180,11 @@ rates were measured on the board.
   board on battery power, limited by the recording interface. With the
   board's USB also plugged into the recording PC, a ground loop raised it to
   about -52 dBFS.
+- Output stayed linear and undistorted up to the recording interface's own
+  clipping point (about -4 dBFS digital at full volume). The soft-clip
+  limiter only acts above -0.45 dBFS after the volume gain; a full-scale sine
+  through it measures about -41 dB THD+N (calculated from the limiter curve),
+  and at the default connect volume of 60 it never engages.
 
 ## Building
 
