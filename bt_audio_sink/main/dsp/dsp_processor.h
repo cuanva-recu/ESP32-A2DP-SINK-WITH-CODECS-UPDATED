@@ -52,7 +52,7 @@ public:
     bool is3DSoundEnabled() const { return false; }
 
     // Volume-based bass compensation (0-127 A2DP range)
-    // As volume decreases, bass boost increases (max +3dB at 0% volume)
+    // As volume decreases, bass boost increases (max +5dB at 0% volume)
     void setVolume(uint8_t volume) {
         m_volumeGain = (volume == 0) ? 0.0f : ((float)volume * fast_recipsf2(127.0f));
         m_volume = volume;
@@ -684,14 +684,14 @@ inline void DSPProcessor::resetAllFilters() {
 inline void DSPProcessor::updateBassCompensation() {
     if (m_sampleRate == 0) return;
     
-    // Calculate bass boost: 0dB at full volume (127), +3dB at zero volume
-    // Use exponential curve for more natural perception
+    // Calculate bass boost: 0dB at full volume (127), +5dB at zero volume
+    // Use a quadratic curve for more natural perception
     // volumePct: 0.0 (mute) to 1.0 (max)
     float volumePct = (float)m_volume * fast_recipsf2(127.0f);
     
-    // Exponential curve: more boost at lower volumes
-    // boost_dB = 3.0 * (1 - volumePct)^2
-    // This gives ~0dB at 100%, ~0.75dB at 50%, ~3dB at 0%
+    // Quadratic curve: more boost at lower volumes
+    // boost_dB = 5.0 * (1 - volumePct)^2
+    // This gives 0dB at 100%, ~1.25dB at 50%, 5dB at 0%
     float factor = 1.0f - volumePct;
     m_bassCompensationDB = 5.0f * factor * factor;
     
