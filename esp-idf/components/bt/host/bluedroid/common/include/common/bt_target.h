@@ -1335,10 +1335,13 @@
 #endif  ///BLE_INCLUDED == TRUE && SMP_INCLUDED == TRUE
 #endif
 
-/* The default MITM Protection Requirement (for Simple Pairing)
- * Possible values are BTM_AUTH_SP_YES or BTM_AUTH_SP_NO */
+/* The default authentication requirement for Simple Pairing.
+ * Request general bonding (without MITM, so pairing stays "just works"):
+ * with BTM_AUTH_SP_NO the sink answered "no bonding" when a source started
+ * general bonding, so sources such as BlueZ kept the pairing temporary while
+ * this side stored a link key - every reconnect then failed authentication. */
 #ifndef BTM_DEFAULT_AUTH_REQ
-#define BTM_DEFAULT_AUTH_REQ            BTM_AUTH_SP_NO
+#define BTM_DEFAULT_AUTH_REQ            BTM_AUTH_SPGB_NO
 #endif
 
 /* The default MITM Protection Requirement for dedicated bonding using Simple Pairing

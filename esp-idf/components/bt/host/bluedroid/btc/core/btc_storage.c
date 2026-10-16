@@ -207,8 +207,10 @@ bt_status_t btc_storage_load_bonded_devices(void)
 **
 ** Description      BTC storage API - Once an ACL link is established and remote
 **                  bd_addr is already stored in NVRAM, update the config and update
-**                  the remote device to be the newest active device, The updates will
-**                  not be stored into NVRAM immediately.
+**                  the remote device to be the newest active device. When this
+**                  changes the order, it is saved to NVRAM so that eviction of the
+**                  least recently used bond (see btc_storage_add_bonded_device)
+**                  still holds after a reboot.
 **
 ** Returns          BT_STATUS_SUCCESS if successful, BT_STATUS_FAIL otherwise
 **
@@ -221,7 +223,14 @@ bool btc_storage_update_active_device(bt_bdaddr_t *remote_bd_addr)
     BTC_TRACE_DEBUG("Update active device: Remote device:%s\n", bdstr);
 
     btc_config_lock();
+    const btc_config_section_iter_t *first = btc_config_section_begin();
+    bool already_newest = (first != btc_config_section_end()) &&
+                          (strcmp(btc_config_section_name(first), bdstr) == 0);
     ret = btc_config_update_newest_section(bdstr);
+    /* Only write when the order changed, to avoid flash wear on every reconnect */
+    if (ret && !already_newest) {
+        btc_config_flush();
+    }
     btc_config_unlock();
 
     return ret ? BT_STATUS_SUCCESS : BT_STATUS_FAIL;

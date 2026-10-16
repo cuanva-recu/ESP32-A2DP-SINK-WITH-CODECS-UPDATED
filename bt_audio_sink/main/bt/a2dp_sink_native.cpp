@@ -123,6 +123,7 @@ void NativeA2DPSink::av_hdl_stack_evt(uint16_t event, void *p_param) {
     esp_a2d_sink_init();
     esp_a2d_sink_register_data_callback(data_cb_trampoline);
     esp_err_t scan_err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE); ESP_LOGI(TAG, "set_scan_mode: %s", esp_err_to_name(scan_err));
+    ESP_LOGI(TAG, "bonded classic devices: %d", esp_bt_gap_get_bond_device_num());
     if (scan_err != ESP_OK) { ESP_LOGE(TAG, "set_scan_mode failed: %s", esp_err_to_name(scan_err)); }
 }
 

@@ -343,7 +343,7 @@ static void btc_a2dp_sink_ctrl(void *param)
         btc_a2dp_sink_rx_flush();
         break;
     default:
-        APPL_TRACE_WARNING("media task unhandled evt: 0x%x\n", sig);
+        APPL_TRACE_WARNING("media task unhandled evt: 0x%x\n", p_buf->event);
     }
 
     if (param != NULL) {
