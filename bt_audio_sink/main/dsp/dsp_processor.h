@@ -126,12 +126,13 @@ private:
     // - Tanh-style soft clipping = gentle saturation instead of hard clip
     // - Much lower CPU usage than compressor
     // - Preserves transients and dynamics better
-    // - Threshold raised to 0.98 to avoid bass distortion
+    // - Threshold 0.95 (-0.45 dBFS): peaks up to -0.5 dBFS pass untouched; a
+    //   full-scale sine comes out at about -41 dB THD+N (-30 dB at 0.85)
     // -----------------------------------------------------------
     struct SoftClipper {
-        float threshold = 0.85f;     // Linear (transparent) below this level
+        float threshold = 0.95f;     // Linear (transparent) below this level
         float ceiling = 1.0f;        // Hard asymptote the output can never exceed
-        float invRange = 1.0f / (1.0f - 0.85f);  // 1/(1-threshold), precomputed
+        float invRange = 1.0f / (1.0f - 0.95f);  // 1/(1-threshold), precomputed
 
         // Diagnostics (read+reset once per second by the stats logger)
         uint32_t satCount = 0;       // samples that entered saturation (|x|>threshold)
