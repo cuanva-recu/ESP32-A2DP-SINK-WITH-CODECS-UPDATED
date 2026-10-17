@@ -2314,7 +2314,7 @@
      g_a2dp.set_output_active(false);
      g_a2dp.set_stream_reader(onStreamData, false);
      g_a2dp.set_codec_config_callback(onCodecConfig);
-     g_a2dp.set_auto_reconnect(false);
+     g_a2dp.set_auto_reconnect(true);   // reconnect to the last source after boot / link loss
      g_a2dp.set_task_core(1);
      g_a2dp.set_on_connection_state_changed(onConnectionState);
      g_a2dp.set_on_audio_state_changed(onAudioState);

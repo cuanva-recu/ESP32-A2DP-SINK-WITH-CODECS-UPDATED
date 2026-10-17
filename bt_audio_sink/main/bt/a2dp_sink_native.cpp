@@ -124,6 +124,7 @@ void NativeA2DPSink::av_hdl_stack_evt(uint16_t event, void *p_param) {
     esp_a2d_sink_register_data_callback(data_cb_trampoline);
     esp_err_t scan_err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE); ESP_LOGI(TAG, "set_scan_mode: %s", esp_err_to_name(scan_err));
     ESP_LOGI(TAG, "bonded classic devices: %d", esp_bt_gap_get_bond_device_num());
+    if (is_autoreconnect_allowed) reconnect_at_boot();
     if (scan_err != ESP_OK) { ESP_LOGE(TAG, "set_scan_mode failed: %s", esp_err_to_name(scan_err)); }
 }
 
@@ -165,6 +166,7 @@ void NativeA2DPSink::av_hdl_a2d_evt(uint16_t event, void *p_param) {
             memcpy(peer_bd_addr, bda, ESP_BD_ADDR_LEN);
             set_last_connection(peer_bd_addr);
         }
+        reconnect_on_connection_state(connection_state, a2d->conn_stat.disc_rsn, bda);
         if (connection_state_cb) connection_state_cb(connection_state, this);
         break;
     }
@@ -461,8 +463,106 @@ void NativeA2DPSink::get_last_connection() {
     if (nvs_open("a2dp", NVS_READONLY, &handle)==ESP_OK) { size_t len=6; nvs_get_blob(handle, "last_bda", last_connection, &len); nvs_close(handle); }
 }
 void NativeA2DPSink::set_last_connection(esp_bd_addr_t bda) {
+    if (memcmp(last_connection, bda, ESP_BD_ADDR_LEN) == 0) return;   // unchanged: avoid flash writes on every reconnect
+    memcpy(last_connection, bda, ESP_BD_ADDR_LEN);
     nvs_handle_t handle;
     if (nvs_open("a2dp", NVS_READWRITE, &handle)==ESP_OK) { nvs_set_blob(handle, "last_bda", bda, 6); nvs_commit(handle); nvs_close(handle); }
+}
+
+// -----------------------------------------------------------
+// Auto-reconnect: sources rarely page a sink that went away, so after a
+// reboot (or link loss) the sink connects back to the source itself.
+// Runs on the app task; retries are spaced by a one-shot timer.
+// -----------------------------------------------------------
+void NativeA2DPSink::reconnect_at_boot() {
+    reconnect_target_count = 0;
+    int n = esp_bt_gap_get_bond_device_num();
+    if (n <= 0) return;
+    esp_bd_addr_t *bonded = (esp_bd_addr_t *)malloc(n * sizeof(esp_bd_addr_t));
+    if (!bonded) return;
+    if (esp_bt_gap_get_bond_device_list(&n, bonded) != ESP_OK) n = 0;
+
+    // Last A2DP source first (if still bonded), then other bonds, most recent first
+    if (has_last_connection()) {
+        get_last_connection();
+        for (int i = 0; i < n; i++) {
+            if (memcmp(bonded[i], last_connection, ESP_BD_ADDR_LEN) == 0) {
+                memcpy(reconnect_targets[reconnect_target_count++], last_connection, ESP_BD_ADDR_LEN);
+                break;
+            }
+        }
+    }
+    for (int i = 0; i < n && reconnect_target_count < RECONNECT_MAX_TARGETS; i++) {
+        bool dup = false;
+        for (int j = 0; j < reconnect_target_count; j++)
+            if (memcmp(bonded[i], reconnect_targets[j], ESP_BD_ADDR_LEN) == 0) dup = true;
+        if (!dup) memcpy(reconnect_targets[reconnect_target_count++], bonded[i], ESP_BD_ADDR_LEN);
+    }
+    free(bonded);
+    if (reconnect_target_count > 0) reconnect_start(RECONNECT_BOOT_TRIES, false);
+}
+
+void NativeA2DPSink::reconnect_start(int tries_per_target, bool delay_first) {
+    reconnect_tries_per_target = tries_per_target;
+    reconnect_target_idx = 0;
+    connection_retry_count = 0;
+    reconnect_status = IsReconnecting;
+    if (delay_first) reconnect_arm_timer();
+    else reconnect_attempt();
+}
+
+void NativeA2DPSink::reconnect_attempt() {
+    if (reconnect_status != IsReconnecting) return;
+    if (connection_state != ESP_A2D_CONNECTION_STATE_DISCONNECTED) {   // someone connected meanwhile
+        reconnect_status = AutoReconnect;
+        return;
+    }
+    uint8_t *bda = reconnect_targets[reconnect_target_idx];
+    ESP_LOGI(TAG, "auto-reconnect: %02x:%02x:%02x:%02x:%02x:%02x (attempt %d/%d)",
+             bda[0], bda[1], bda[2], bda[3], bda[4], bda[5], connection_retry_count + 1, reconnect_tries_per_target);
+    if (esp_a2d_sink_connect(bda) != ESP_OK) reconnect_schedule_next();
+}
+
+void NativeA2DPSink::reconnect_schedule_next() {
+    if (++connection_retry_count >= reconnect_tries_per_target) {
+        connection_retry_count = 0;
+        if (++reconnect_target_idx >= reconnect_target_count) {
+            ESP_LOGI(TAG, "auto-reconnect: no source reachable, waiting for a connection");
+            reconnect_status = AutoReconnect;
+            return;
+        }
+    }
+    reconnect_arm_timer();
+}
+
+void NativeA2DPSink::reconnect_arm_timer() {
+    if (!reconnect_timer) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void *) {
+            if (instance) instance->app_work_dispatch([](uint16_t, void *) { if (instance) instance->reconnect_attempt(); }, 0, nullptr, 0);
+        };
+        args.name = "a2dp_reconnect";
+        if (esp_timer_create(&args, &reconnect_timer) != ESP_OK) { reconnect_status = AutoReconnect; return; }
+    }
+    esp_timer_start_once(reconnect_timer, (uint64_t)reconnect_delay * 1000);
+}
+
+void NativeA2DPSink::reconnect_on_connection_state(esp_a2d_connection_state_t state, esp_a2d_disc_rsn_t rsn, const uint8_t *bda) {
+    if (!is_autoreconnect_allowed) return;
+    if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+        if (reconnect_timer) esp_timer_stop(reconnect_timer);
+        reconnect_status = AutoReconnect;
+    } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+        if (reconnect_status == IsReconnecting) {
+            if (memcmp(bda, reconnect_targets[reconnect_target_idx], ESP_BD_ADDR_LEN) == 0) reconnect_schedule_next();
+        } else if (rsn == ESP_A2D_DISC_RSN_ABNORMAL) {
+            // Link lost (e.g. out of range): try to get the same source back
+            memcpy(reconnect_targets[0], bda, ESP_BD_ADDR_LEN);
+            reconnect_target_count = 1;
+            ESP_LOGI(TAG, "auto-reconnect: link lost");
+            reconnect_start(try_reconnect_max_count, true);
+        }
+    }
 }
 
 // Callback setters

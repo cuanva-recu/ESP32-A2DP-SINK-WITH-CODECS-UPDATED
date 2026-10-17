@@ -21,6 +21,7 @@
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 #include "sys/lock.h"
+#include "esp_timer.h"
 
 // Same callback signatures as BluetoothA2DPSink
 using a2dp_stream_reader_cb = void (*)(const uint8_t *data, uint32_t len);
@@ -99,6 +100,15 @@ private:
     int try_reconnect_max_count = AUTOCONNECT_TRY_NUM;
     int connection_retry_count = 0;
     int reconnect_delay = 1000;
+    // Reconnect targets, most recent first: at boot the last A2DP source and
+    // other bonded devices; after a link loss just the lost source
+    static constexpr int RECONNECT_MAX_TARGETS = 3;
+    static constexpr int RECONNECT_BOOT_TRIES = 2;   // per device at boot
+    esp_bd_addr_t reconnect_targets[RECONNECT_MAX_TARGETS] = {};
+    int reconnect_target_count = 0;
+    int reconnect_target_idx = 0;
+    int reconnect_tries_per_target = RECONNECT_BOOT_TRIES;
+    esp_timer_handle_t reconnect_timer = nullptr;
     int task_core = 0;
 
     // Volume
@@ -176,4 +186,12 @@ private:
     bool has_last_connection();
     void get_last_connection();
     void set_last_connection(esp_bd_addr_t bda);
+
+    // Auto-reconnect
+    void reconnect_at_boot();
+    void reconnect_start(int tries_per_target, bool delay_first);
+    void reconnect_attempt();
+    void reconnect_schedule_next();
+    void reconnect_arm_timer();
+    void reconnect_on_connection_state(esp_a2d_connection_state_t state, esp_a2d_disc_rsn_t rsn, const uint8_t *bda);
 };

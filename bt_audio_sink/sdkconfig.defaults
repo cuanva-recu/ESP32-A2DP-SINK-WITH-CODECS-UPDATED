@@ -45,7 +45,10 @@ CONFIG_BT_MULTI_CONNECTION_ENBALE=y
 
 # Controller connection limits
 CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
-CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=1
+# Two BR/EDR ACL slots: with one, the controller rejects an outgoing page
+# (Create Connection -> 0x09 Connection Limit Exceeded), so the sink could not
+# reconnect to its last source after a reboot.
+CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=2
 CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=0
 
 # Dedicated Bluetooth/low-latency core.
