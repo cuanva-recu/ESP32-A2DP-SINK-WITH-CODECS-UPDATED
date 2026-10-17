@@ -105,6 +105,14 @@
  // A link that drops and comes back within this window is the same session
  // (codec switch or codec fallback); one that stays down longer has ended.
  static const int64_t     DISCONNECT_SOUND_DELAY_US = 1500000;  // 1.5s - codec switches reconnect well within this
+ // A codec configuration that arrives while the link is down means the source is
+ // already reconnecting; finishing that can take another 1.5 s, so wait longer
+ static const int64_t     RECONNECTING_SOUND_DELAY_US = 3000000;
+ static volatile int64_t  g_disconnectSoundDueUs = 0;    // When the pending disconnect sound plays
+ 
+ // Stream health check (see checkStreamHealth)
+ static volatile bool     g_streamStarted = false;       // A2DP audio state is STARTED
+ static volatile int64_t  g_streamStartTimeUs = 0;
  static volatile bool     g_connectionAnnounced = false;    // Connect sound already handled for this session
  static const int64_t     CODEC_STABLE_DELAY_US = 400000;   // 400ms - wait this long after last codec config
  
@@ -1533,6 +1541,12 @@
          .timestampUs = esp_timer_get_time()
      };
  
+     // A slow codec switch: the source has started reconnecting, so hold off the
+     // disconnect sound (it would interrupt the stream that is about to start)
+     if (g_disconnectSoundPending && !g_a2dpConnected) {
+         g_disconnectSoundDueUs = req.timestampUs + RECONNECTING_SOUND_DELAY_US;
+     }
+ 
      applyCodecConfig(req);
  }
  
@@ -1649,6 +1663,8 @@
          
          // Record disconnect time for codec switch detection
          g_lastDisconnectTime = esp_timer_get_time();
+         g_disconnectSoundDueUs = g_lastDisconnectTime + DISCONNECT_SOUND_DELAY_US;
+         g_streamStarted = false;
          
          // Keep any pending connected sound: sources such as Android often
          // connect with one codec and reconnect with another within ~100 ms.
@@ -1738,6 +1754,9 @@
      
      ESP_LOGI(TAG, ">>> A2DP Audio State: %s", stateStr);
      
+     g_streamStarted = (state == ESP_A2D_AUDIO_STATE_STARTED);
+     if (g_streamStarted) g_streamStartTimeUs = esp_timer_get_time();
+ 
      if (state == ESP_A2D_AUDIO_STATE_SUSPEND) {
          smooth30_dB = smooth60_dB = smooth100_dB = -60.0f;
          g_pipeline.clear();
@@ -1745,6 +1764,80 @@
      } else if (state == ESP_A2D_AUDIO_STATE_STARTED) {
          // Restart BLE advertising so app can connect while audio is playing
          g_ble.restartAdvertising();
+     }
+ }
+ 
+ // -----------------------------------------------------------
+ // Stream health check
+ // -----------------------------------------------------------
+ // If the source keeps sending at its full packet rate but the board plays far
+ // less than real time, the receive path is stuck: heard as regular clicking
+ // bursts instead of music until the link is reconnected. Flush the audio
+ // buffer first; if that does not help, restart the board, which reconnects to
+ // the source at boot (the PC refuses a reconnect started by the sink while it
+ // still holds the rest of the link). A weak radio link lowers the packet rate
+ // too, so it never triggers this.
+ extern "C" uint32_t btc_a2dp_sink_get_rx_pkt_count(void);
+ 
+ static void checkStreamHealth() {
+     static const int64_t WINDOW_US = 1000000;
+     static const int64_t SETTLE_US = 2000000;    // ignore the stream start
+     static const int FLUSH_AFTER = 3;            // bad windows in a row
+     static const int RESTART_AFTER = 8;
+     static bool wasStreaming = false;
+     static int64_t windowStartUs = 0;
+     static uint32_t lastPkts = 0, lastFrames = 0, peakPkts = 0;
+     static int badWindows = 0;
+ 
+     const int64_t now = esp_timer_get_time();
+     const bool streaming = g_streamStarted && g_a2dpConnected && !g_codecReconfiguring;
+     if (!streaming || !wasStreaming) {
+         wasStreaming = streaming;
+         windowStartUs = now;
+         lastPkts = btc_a2dp_sink_get_rx_pkt_count();
+         lastFrames = g_pipeline.getBtFramesOut();
+         peakPkts = 0;
+         badWindows = 0;
+         return;
+     }
+     if (now - windowStartUs < WINDOW_US) return;
+ 
+     const uint32_t pktCount = btc_a2dp_sink_get_rx_pkt_count();
+     const uint32_t frameCount = g_pipeline.getBtFramesOut();
+     const uint32_t pkts = pktCount - lastPkts;
+     const uint32_t frames = frameCount - lastFrames;
+     const uint32_t expected = (uint32_t)((uint64_t)g_i2s.getSampleRate() * (uint64_t)(now - windowStartUs) / 1000000);
+     windowStartUs = now;
+     lastPkts = pktCount;
+     lastFrames = frameCount;
+ 
+     // Sounds mute or duck the stream, so their windows say nothing
+     if (g_sound.isPlaying() || now - g_streamStartTimeUs < SETTLE_US) {
+         badWindows = 0;
+         return;
+     }
+     if (pkts > peakPkts) peakPkts = pkts;
+     const bool sourceSending = peakPkts >= 10 && pkts * 5 >= peakPkts * 4;
+     const bool outputShort = frames * 10 < expected * 7;
+     if (!sourceSending || !outputShort) {
+         badWindows = 0;
+         return;
+     }
+ 
+     badWindows++;
+     ESP_LOGW(TAG, "Stream health: %u packets/s but played %u of %u frames",
+              (unsigned)pkts, (unsigned)frames, (unsigned)expected);
+     if (badWindows == FLUSH_AFTER) {
+         ESP_LOGW(TAG, "Stream health: flushing the audio buffer");
+         g_pipeline.clear();
+         g_i2s.zeroDMA();
+     } else if (badWindows == RESTART_AFTER) {
+         ESP_LOGW(TAG, "Stream health: still stuck - restarting to reconnect the source");
+         // Shut Bluetooth down first so the source sees the link drop now
+         // instead of waiting out its supervision timeout before reconnecting
+         esp_bluedroid_disable();
+         vTaskDelay(pdMS_TO_TICKS(100));   // let the log drain
+         esp_restart();
      }
  }
  
@@ -1780,6 +1873,8 @@
      while (true) {
          uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
          
+         checkStreamHealth();
+ 
          // Check if connected sound is pending and the link is up with a stable
          // codec. While the link is down (e.g. mid codec fallback) keep waiting.
          if (g_connectedSoundPending && g_a2dpConnected) {
@@ -1808,8 +1903,7 @@
          
          // Play the disconnect sound once the link has stayed down long enough
          // that this is a real disconnect rather than a codec switch
-         if (g_disconnectSoundPending &&
-             esp_timer_get_time() - g_lastDisconnectTime >= DISCONNECT_SOUND_DELAY_US) {
+         if (g_disconnectSoundPending && esp_timer_get_time() >= g_disconnectSoundDueUs) {
              g_disconnectSoundPending = false;
              if (g_a2dpConnected) {
                  // Reconnected in the meantime - nothing to announce

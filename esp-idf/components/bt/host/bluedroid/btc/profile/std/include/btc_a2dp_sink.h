@@ -76,6 +76,9 @@ BOOLEAN btc_a2dp_sink_rx_flush_req(void);
  *******************************************************************************/
 UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_buf);
 
+/* Number of media packets received from the source since boot */
+uint32_t btc_a2dp_sink_get_rx_pkt_count(void);
+
 
 /*******************************************************************************
  **

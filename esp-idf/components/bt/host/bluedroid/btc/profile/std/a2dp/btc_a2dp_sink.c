@@ -794,6 +794,15 @@ static void btc_a2dp_sink_rx_flush(void)
  ** Returns          size of the queue
  *******************************************************************************/
 
+/* Media packets received from the source, for the application's stream
+ * health check (counts every arrival, including ones dropped below) */
+static volatile uint32_t rx_pkt_count = 0;
+
+uint32_t btc_a2dp_sink_get_rx_pkt_count(void)
+{
+    return rx_pkt_count;
+}
+
 UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
 {
     if (btc_a2dp_sink_state != BTC_A2DP_SINK_STATE_ON){
@@ -807,6 +816,7 @@ UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
         return 0;
     }
 
+    rx_pkt_count++;
     if (a2dp_sink_local_param.btc_aa_snk_cb.rx_flush == TRUE ||
         a2dp_sink_local_param.decoder_ready == FALSE) { /* Flush enabled, do not enque*/
         osi_free(p_pkt);  /* Free original - caller expects us to take ownership */

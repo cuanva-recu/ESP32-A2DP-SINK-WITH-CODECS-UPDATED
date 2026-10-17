@@ -33,6 +33,7 @@ public:
         , m_writeIdx(0)
         , m_readIdx(0)
         , m_writeCount(0)
+        , m_btFramesOut(0)
         , m_dropCount(0)
         , m_catchupDrops(0)
         , m_underrunCount(0)
@@ -327,6 +328,7 @@ public:
         if (!skipWrite) {
             i2s.write(m_dspOut, outFrames * 2u * sizeof(int32_t));
             m_writeCount++;
+            m_btFramesOut += frames;
         }
 
         m_lastProcessMs = millis32();
@@ -362,6 +364,7 @@ public:
 
     uint32_t getLastProcessMs() const { return m_lastProcessMs; }
     uint32_t getWriteCount() const { return m_writeCount; }
+    uint32_t getBtFramesOut() const { return m_btFramesOut; }
     uint32_t getDropCount() const { return m_dropCount; }
     uint32_t getCatchupDrops() const { return m_catchupDrops; }
     uint32_t getUnderrunCount() const { return m_underrunCount; }
@@ -488,6 +491,7 @@ private:
         if (!skipWrite) {
             i2s.write(m_dspOut, APP_DSP_OUT_FRAMES * 2u * sizeof(int32_t));
             m_writeCount++;
+            m_btFramesOut += framesToRead;
         }
 
         m_fillAvg = (int32_t)getFillFrames();
@@ -510,6 +514,7 @@ private:
     volatile uint32_t m_writeIdx;
     volatile uint32_t m_readIdx;
     volatile uint32_t m_writeCount;
+    volatile uint32_t m_btFramesOut;   // Bluetooth frames written to I2S
     volatile uint32_t m_dropCount;
     volatile uint32_t m_catchupDrops;
     volatile uint32_t m_underrunCount;
