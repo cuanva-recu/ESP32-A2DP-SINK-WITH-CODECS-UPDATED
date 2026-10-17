@@ -1709,9 +1709,11 @@
                       (esp_timer_get_time() - g_lastDisconnectTime) / 1000);
              g_holdConnectVolume = false;  // keep the volume the user has set since
          } else if (APP_CONNECT_VOLUME >= 0) {
-             // New session: start at line level. The source's volume slider
-             // follows via the AVRCP volume notification; any volume the source
-             // sends during the grace period is overridden (see volume callback).
+             // New session: start at the configured volume (by default the full
+             // slider, which gives APP_MAX_OUTPUT_LEVEL, line level). The
+             // source's volume slider follows via the AVRCP volume notification;
+             // any volume the source sends during the grace period is overridden
+             // (see volume callback).
              ESP_LOGI(TAG, "New connection - setting volume to %d", APP_CONNECT_VOLUME);
              g_holdConnectVolume = true;
              g_holdConnectVolumeUntil = esp_timer_get_time() + CONNECT_VOLUME_HOLD_US;

@@ -87,7 +87,7 @@ The `main` branch is designed for internal RAM operation on common ESP32-WROOM b
   - Division-free biquad filters using ESP32 hardware reciprocal approximations.
 - **Q1.31 stereo ring buffer** with software ASRC and A2DP backpressure.
 - **Overlay mixer** for startup, pairing, connected, and max-volume sound effects.
-- **Line-level volume on connect:** each new connection starts at about 1 Vrms full scale, and the source's volume slider follows (see [Connect Volume](#connect-volume)).
+- **Line-level output:** the top of the source's volume slider gives about 1 Vrms full scale, and each new connection starts there (see [Output Level and Connect Volume](#output-level-and-connect-volume)).
 
 ### Visual
 
@@ -187,7 +187,7 @@ rates were measured on the board.
   clipping point (about -4 dBFS digital at full volume). The soft-clip
   limiter only acts above -0.45 dBFS after the volume gain; a full-scale sine
   through it measures about -41 dB THD+N (calculated from the limiter curve),
-  and at the default connect volume of 60 it never engages.
+  and at the default maximum output level of 60 it never engages.
 
 ## Building
 
@@ -297,21 +297,23 @@ Then open **A2DP DSP BLE Configuration** to configure:
 - Device name and firmware version.
 - Audio buffer pool count and size.
 
-### Connect Volume
+### Output Level and Connect Volume
 
-`CONFIG_CONNECT_VOLUME` (under **DSP Configuration**) sets the volume applied when a source connects, so the output starts at line level for an amplifier's aux input. The value is Bluetooth absolute volume (0-127), applied as a linear gain of `volume / 127`. With the PCM5102A's 2.1 Vrms full-scale output:
+The output is set up for an amplifier's or car head unit's aux input: the source's volume slider is rescaled so that its top gives line level, and every new connection starts there. Both settings are under **DSP Configuration** and use the Bluetooth absolute-volume scale (0-127).
 
-| `CONFIG_CONNECT_VOLUME` | Gain | Full-scale output |
+`CONFIG_MAX_OUTPUT_LEVEL` sets the output at full slider, as a linear gain of `level / 127`. With the PCM5102A's 2.1 Vrms full-scale output:
+
+| `CONFIG_MAX_OUTPUT_LEVEL` | Gain | Full-scale output at full slider |
 |---:|---:|---:|
 | 127 | 0 dB | 2.1 Vrms (CD-player level) |
 | 60 (default) | -6.5 dB | About 1 Vrms |
 | 19 | -16.5 dB | About 0.32 Vrms (-10 dBV) |
-| -1 | - | Disabled; the source's own volume is kept |
+
+`CONFIG_CONNECT_VOLUME` sets the slider position applied when a source connects. The default of 127 starts at the full output level; -1 keeps the source's own volume. The overall gain is `volume / 127 x level / 127`, so the whole slider range stays usable below the maximum. Measured on the loopback with the defaults, half slider is 6 dB below full slider.
 
 - Phones and PCs restore their saved volume a few seconds after connecting, once AVRCP is up. The first volume the source sends within 15 s of connecting is replaced with the connect volume, and the source is notified so its slider moves to match.
-- Sources map 0-127 to their own slider curve, so the slider may not sit at the same fraction as the gain. For example, one Android phone showed volume 60 at about a third of its slider.
 - Codec-switch reconnects within a session keep the volume the user has set.
-- The volume-based bass compensation still applies below full volume, adding about +1.4 dB below 100 Hz at the default of 60.
+- The volume-based bass compensation follows the slider position: none at full slider, rising to about +5 dB below 100 Hz as the slider goes down.
 
 ## Project Structure
 

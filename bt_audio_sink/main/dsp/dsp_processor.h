@@ -53,8 +53,10 @@ public:
 
     // Volume-based bass compensation (0-127 A2DP range)
     // As volume decreases, bass boost increases (max +5dB at 0% volume)
+    // The full slider reaches APP_MAX_OUTPUT_LEVEL (e.g. line level), not 0 dB.
     void setVolume(uint8_t volume) {
-        m_volumeGain = (volume == 0) ? 0.0f : ((float)volume * fast_recipsf2(127.0f));
+        static constexpr float kMaxGain = (float)APP_MAX_OUTPUT_LEVEL / 127.0f;
+        m_volumeGain = (volume == 0) ? 0.0f : ((float)volume * fast_recipsf2(127.0f) * kMaxGain);
         m_volume = volume;
         updateBassCompensation();
     }

@@ -54,15 +54,26 @@ menu "A2DP DSP BLE Configuration"
     endmenu
 
     menu "DSP Configuration"
+        config MAX_OUTPUT_LEVEL
+            int "Output level at full volume (1-127)"
+            default 60
+            range 1 127
+            help
+                Gain at the top of the source's volume slider, on the AVRCP 0-127
+                scale (linear gain MAX_OUTPUT_LEVEL/127). The slider is rescaled so
+                its whole range stays usable below this level. The PCM5102A gives
+                2.1 Vrms at full scale, so 60 is about 1 Vrms line level for an aux
+                input, 127 is 2.1 Vrms.
+
         config CONNECT_VOLUME
             int "Volume set on each new connection (0-127, -1 = keep source volume)"
-            default 60
+            default 127
             range -1 127
             help
-                Absolute volume (AVRCP 0-127, linear gain volume/127) applied when a
-                source connects; the source's volume slider follows it. The PCM5102A
-                gives 2.1 Vrms at full scale, so 60 is about 1 Vrms line level for an
-                aux input, 127 is 2.1 Vrms. -1 keeps whatever volume the source sends.
+                Absolute volume (AVRCP 0-127) applied when a source connects; the
+                source's volume slider follows it. The output gain is
+                volume/127 x MAX_OUTPUT_LEVEL/127, so 127 starts at the full
+                output level. -1 keeps whatever volume the source sends.
 
         config AUDIO_ANALYSIS_ENABLE
             bool "Enable audio analysis (beat LED, LED matrix, BLE meters)"
