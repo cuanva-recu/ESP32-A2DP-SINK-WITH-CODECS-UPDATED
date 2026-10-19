@@ -15,15 +15,20 @@
   <a href="https://github.com/WillyBilly06/esp32-a2dp-sink-with-LDAC-APTX-AAC">View the original ESP-IDF 5.1.4 version</a>
 </p>
 
+> **This is a fork** of [WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED).
+> Development happens on the [`decoder-arena-4mb`](https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/decoder-arena-4mb) branch of
+> [cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED), which adds 4MB-flash and headless
+> board support, Linux build scripts, and audio and reconnect fixes.
+
 ---
 
 # ESP32 A2DP Sink with LDAC, aptX, Opus, AAC, and SBC
 
-> **Branch:** `main` - runs entirely on internal SRAM. No PSRAM is required.
+> **Branch:** `decoder-arena-4mb` - built on upstream `main`; runs entirely on internal SRAM. No PSRAM is required.
 
 This project turns a standard ESP32-WROOM module into a high-quality Bluetooth Classic A2DP audio receiver. It uses a patched ESP-IDF v5.5.2 Bluetooth stack with native multi-codec support for LDAC, aptX-HD, aptX, aptX-LL, Opus, AAC, and SBC.
 
-The `main` branch is designed for internal RAM operation on common ESP32-WROOM boards. For the original PSRAM-dependent implementation, see the [`PSRAM-only`](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/PSRAM-only) branch.
+The `main` branch is designed for internal RAM operation on common ESP32-WROOM boards. For the original PSRAM-dependent implementation, see the [`PSRAM-only`](https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/PSRAM-only) branch.
 
 ## Highlights
 
@@ -191,33 +196,83 @@ rates were measured on the board.
 
 ## Building
 
+The build instructions target Linux (tested on Ubuntu). The repository includes the patched ESP-IDF v5.5.2 tree in `esp-idf/`, so no separate ESP-IDF checkout is needed.
+
 ### Prerequisites
 
-1. ESP-IDF v5.5.2. This repository includes the patched ESP-IDF tree in `esp-idf/`.
-2. Python 3.11 or newer.
-3. An ESP32 board connected over USB.
+1. Python 3.11 or newer, plus the ESP-IDF host packages:
 
-### Build Steps
+   ```bash
+   sudo apt install git wget flex bison gperf python3 python3-pip python3-venv \
+     cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+   ```
 
-```bat
-cd esp-idf
-install.bat
-export.bat
+2. Serial port access. Add yourself to the `dialout` group, then log out and back in:
 
-cd ..\bt_audio_sink
+   ```bash
+   sudo usermod -aG dialout "$USER"
+   ```
+
+3. An ESP32 board connected over USB. It usually shows up as `/dev/ttyUSB0` (CP210x / CH340) or `/dev/ttyACM0`.
+
+### Clone and install the toolchain
+
+```bash
+git clone https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED.git
+cd ESP32-A2DP-SINK-WITH-CODECS-UPDATED
+./esp-idf/install.sh esp32
+```
+
+`install.sh` only needs to run once. It installs the compiler and Python environment under `~/.espressif`.
+
+### Build and flash
+
+`build_flash.sh` sets up the ESP-IDF environment, picks the right config for your board, and runs `idf.py`:
+
+```bash
+./build_flash.sh                                # 8MB board: build, flash, monitor
+./build_flash.sh -b 4mb -p /dev/ttyUSB0         # 4MB board
+./build_flash.sh -b 4mb -H -p /dev/ttyUSB0      # 4MB board with no LED matrix / encoder
+./build_flash.sh -b 4mb -H build app-flash      # any idf.py actions can follow the options
+./build_flash.sh --help
+```
+
+| Option | Meaning |
+|---|---|
+| `-b 8mb` / `-b 4mb` | Flash size and partition layout (default `8mb`). The 4MB layout has two 1.5 MB OTA slots and no recovery partition. |
+| `-H` | Headless: no LED matrix, rotary encoder, or beat LED. Frees CPU and about 6 KB of RAM. |
+| `-p PORT` | Serial port. Without it, `idf.py` picks the first port it finds. |
+| `-B DIR` | Build directory inside `bt_audio_sink/`. Defaults to `build`, `build_4mb`, `build_4mb_headless`, etc. |
+| `-r` | Build and flash the WiFi recovery firmware (8MB layout only). |
+
+Press `Ctrl+]` to leave the serial monitor.
+
+Each variant keeps its own `sdkconfig` in its build directory, generated from the layered `sdkconfig.defaults*` files on the first build. The default 8MB build uses the checked-in `bt_audio_sink/sdkconfig`. Delete a build directory after changing an `sdkconfig.defaults*` file so the new defaults are picked up.
+
+### Recovery partition (8MB boards)
+
+Flash the main firmware first, then the recovery firmware:
+
+```bash
+./build_flash.sh -p /dev/ttyUSB0
+./build_flash.sh -r -p /dev/ttyUSB0
+```
+
+The recovery step writes only `recovery.bin` to the recovery partition at `0x10000`, so the main firmware's bootloader and partition table stay in place.
+
+### Using idf.py directly
+
+```bash
+. esp-idf/export.sh
+cd bt_audio_sink
 idf.py build
-idf.py -p COMXX flash monitor
+idf.py -p /dev/ttyUSB0 flash monitor
+
+# 4MB headless variant
+idf.py -B build_4mb_headless -D SDKCONFIG=build_4mb_headless/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.4mb;sdkconfig.defaults.headless" \
+  -p /dev/ttyUSB0 build flash monitor
 ```
-
-Replace `COMXX` with the serial port for your ESP32.
-
-On first flash, flash the recovery partition as well so the recovery button path is available:
-
-```bat
-idf.py -p COMXX flash
-```
-
-The repository also includes `build_flash.bat` for a Windows build-and-flash workflow.
 
 ## Architecture Overview
 
@@ -255,7 +310,7 @@ Firmware updates can be sent over BLE through the unified protocol. The main app
 
 ### WiFi Recovery OTA
 
-If the main firmware is corrupted, hold **Button 1** during power-on to boot into the recovery partition. Recovery mode:
+Recovery mode is only available with the 8MB partition layout. If the main firmware is corrupted, hold **Button 1** during power-on to boot into the recovery partition. Recovery mode:
 
 - Creates a WiFi access point named `ESP32-Recovery-Setup`.
 - Serves a captive portal.
@@ -269,21 +324,21 @@ The AES-256 key in this repository is a placeholder value.
 Before distributing firmware, generate a unique key:
 
 ```bash
-cd tools
-python encrypt_firmware.py --generate-key
+cd bt_audio_sink/tools
+python3 encrypt_firmware.py --generate-key
 ```
 
 Then update both of these files with the new key:
 
-- `tools/encrypt_firmware.py`
-- `recovery/main/recovery_main.cpp`
+- `bt_audio_sink/tools/encrypt_firmware.py`
+- `bt_audio_sink/recovery/main/recovery_main.cpp`
 
 ## Configuration
 
 Run:
 
-```bat
-idf.py menuconfig
+```bash
+./build_flash.sh menuconfig            # add -b 4mb / -H for the matching variant
 ```
 
 Then open **A2DP DSP BLE Configuration** to configure:
@@ -354,7 +409,7 @@ bt_audio_sink/
     encrypt_firmware.py         AES-256-CBC firmware encryption helper
   ota_releases/                 Encrypted firmware output folder
 esp-idf/                        Patched ESP-IDF v5.5.2 tree
-build_flash.bat                 Windows build and flash helper
+build_flash.sh                  Linux build and flash helper
 ```
 
 The external Arduino libraries from the `PSRAM-only` branch are not used in the `main` branch. The A2DP sink path is implemented through `main/bt/a2dp_sink_native.cpp`, and the codec integrations are patched into the ESP-IDF Bluetooth stack.
