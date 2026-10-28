@@ -18,7 +18,7 @@
 > **This is a fork** of [WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED).
 > Development happens on the [`decoder-arena-4mb`](https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/decoder-arena-4mb) branch of
 > [cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/cuanva-recu/ESP32-A2DP-SINK-WITH-CODECS-UPDATED), which adds 4MB-flash and headless
-> board support, Linux build scripts, and audio and reconnect fixes.
+> board support, Linux build scripts, and audio, pairing, and reconnect fixes.
 
 ---
 
@@ -112,6 +112,8 @@ The `main` branch is designed for internal RAM operation on common ESP32-WROOM b
 
 ### Connectivity
 
+- Bluetooth Classic pairing with nothing to confirm on the board (Secure Simple Pairing; legacy devices without it use PIN 1234), tested with Android, iPhone, and Linux sources. Up to 16 devices stay paired (Classic and BLE share the slots); the least recently connected one is dropped first.
+- Automatic reconnect to the last source after boot (then other paired sources), and to the lost source after a link loss.
 - BLE GATT unified protocol with command, status, and meter characteristics.
 - Real-time 3-band level meters at selectable update rates.
 - Full EQ, control, device name, LED, sound upload, and mute synchronization.
@@ -434,6 +436,32 @@ Clear the Bluetooth cache and pair again:
 sudo rm -rf /var/lib/bluetooth/<adapter-mac>/cache/<device-mac>
 ```
 
+### iPhone or another new device fails to pair
+
+Earlier builds of this branch could not pair with devices they had never
+seen: the iPhone reported "Pairing unsuccessful" and the board logged
+`E(25, 0) in user_cfm_req_reply` followed by `auth failed`. Devices paired
+before that (for example an Android phone) kept working. The Bluetooth stack
+waited for the new device's name in the middle of pairing, so its reply came
+too late for the controller, and the new link key was never stored. Both
+waits are removed in `bta_dm_act.c` and `btm_sec.c`.
+
+After updating, remove the board ("PIONEER SK-21F" by default) from the phone's Bluetooth list
+(Forget This Device on iOS) and pair again.
+
+### Reconnecting takes about a minute after the board resets
+
+Right after a reset the phone still holds its old link to the board until
+its own supervision timeout runs out. If the board pages the phone in that
+window, the page fails with "ACL connection already exists" and the stack
+waits 60 s before trying again. The board now waits 3 s after boot before
+reconnecting, and does not page while a source is already connecting to it.
+An iPhone then reconnects in about 7 s.
+
+Sources with a long supervision timeout, such as a Linux PC (20 s by
+default), can still miss the boot reconnect after a quick reset. Connect
+from the source once its old link has timed out.
+
 ### LED effects are not reactive at low volume
 
 The firmware includes automatic gain control for LED analysis. If the LEDs still do not react, check the LED matrix wiring, power supply, and configured GPIO.
@@ -470,6 +498,8 @@ Expected codec behavior by common source platform:
 | Linux / BlueZ | Depends on BlueZ build and codec plugins |
 
 LC3 is not expected on any Bluetooth Classic A2DP source because LC3 is part of Bluetooth LE Audio, not Classic A2DP.
+
+Tested sources: an Android phone (LDAC, aptX, AAC, Opus), an iPhone (AAC at 44.1 kHz, with pairing and reconnect after a board reset), and a Linux PC with PipeWire (all codecs except AAC).
 
 ## Changes from PSRAM-only
 
