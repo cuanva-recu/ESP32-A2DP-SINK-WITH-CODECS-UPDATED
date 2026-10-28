@@ -458,9 +458,9 @@ waits 60 s before trying again. The board now waits 3 s after boot before
 reconnecting, and does not page while a source is already connecting to it.
 An iPhone then reconnects in about 7 s.
 
-Sources with a long supervision timeout, such as a Linux PC (20 s by
-default), can still miss the boot reconnect after a quick reset. Connect
-from the source once its old link has timed out.
+Sources that keep the Bluetooth default supervision timeout of 20 s (a
+Linux PC did here) can still miss the boot reconnect after a quick reset.
+Connect from the source once its old link has timed out.
 
 ### LED effects are not reactive at low volume
 
