@@ -104,10 +104,19 @@ private:
     // other bonded devices; after a link loss just the lost source
     static constexpr int RECONNECT_MAX_TARGETS = 3;
     static constexpr int RECONNECT_BOOT_TRIES = 2;   // per device at boot
+    // Right after a reset the source may still hold its old link to us (it
+    // only drops it on its supervision timeout). A page then fails with "ACL
+    // connection already exists", and Bluedroid waits 60 s for the source to
+    // connect instead. Give the source time to drop the stale link (or connect
+    // by itself) first, and hold off while any link is coming up.
+    static constexpr int RECONNECT_BOOT_WAIT_MS = 3000;
+    static constexpr int RECONNECT_ACL_WAITS = 5;    // x reconnect_delay
     esp_bd_addr_t reconnect_targets[RECONNECT_MAX_TARGETS] = {};
     int reconnect_target_count = 0;
     int reconnect_target_idx = 0;
     int reconnect_tries_per_target = RECONNECT_BOOT_TRIES;
+    int reconnect_acl_waits = 0;
+    volatile int acl_link_count = 0;                 // classic ACL links up
     esp_timer_handle_t reconnect_timer = nullptr;
     int task_core = 0;
 
@@ -189,9 +198,9 @@ private:
 
     // Auto-reconnect
     void reconnect_at_boot();
-    void reconnect_start(int tries_per_target, bool delay_first);
+    void reconnect_start(int tries_per_target, int first_delay_ms);
     void reconnect_attempt();
     void reconnect_schedule_next();
-    void reconnect_arm_timer();
+    void reconnect_arm_timer(int delay_ms);
     void reconnect_on_connection_state(esp_a2d_connection_state_t state, esp_a2d_disc_rsn_t rsn, const uint8_t *bda);
 };

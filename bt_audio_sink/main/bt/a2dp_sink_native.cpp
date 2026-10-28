@@ -139,6 +139,12 @@ void NativeA2DPSink::gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *
         ESP_LOGI(BT_AV_TAG, "ssp confirm request, num_val %" PRIu32 " - accepting", param->cfm_req.num_val);
         esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
         break;
+    case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+        if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) acl_link_count++;
+        break;
+    case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+        if (acl_link_count > 0) acl_link_count--;
+        break;
     case ESP_BT_GAP_MODE_CHG_EVT:
         ESP_LOGI(BT_AV_TAG, "mode_chg: %d", param->mode_chg.mode);
         break;
@@ -500,15 +506,16 @@ void NativeA2DPSink::reconnect_at_boot() {
         if (!dup) memcpy(reconnect_targets[reconnect_target_count++], bonded[i], ESP_BD_ADDR_LEN);
     }
     free(bonded);
-    if (reconnect_target_count > 0) reconnect_start(RECONNECT_BOOT_TRIES, false);
+    if (reconnect_target_count > 0) reconnect_start(RECONNECT_BOOT_TRIES, RECONNECT_BOOT_WAIT_MS);
 }
 
-void NativeA2DPSink::reconnect_start(int tries_per_target, bool delay_first) {
+void NativeA2DPSink::reconnect_start(int tries_per_target, int first_delay_ms) {
     reconnect_tries_per_target = tries_per_target;
     reconnect_target_idx = 0;
     connection_retry_count = 0;
+    reconnect_acl_waits = 0;
     reconnect_status = IsReconnecting;
-    if (delay_first) reconnect_arm_timer();
+    if (first_delay_ms > 0) reconnect_arm_timer(first_delay_ms);
     else reconnect_attempt();
 }
 
@@ -516,6 +523,11 @@ void NativeA2DPSink::reconnect_attempt() {
     if (reconnect_status != IsReconnecting) return;
     if (connection_state != ESP_A2D_CONNECTION_STATE_DISCONNECTED) {   // someone connected meanwhile
         reconnect_status = AutoReconnect;
+        return;
+    }
+    if (acl_link_count > 0 && reconnect_acl_waits < RECONNECT_ACL_WAITS) {   // a source is connecting
+        reconnect_acl_waits++;
+        reconnect_arm_timer(reconnect_delay);
         return;
     }
     uint8_t *bda = reconnect_targets[reconnect_target_idx];
@@ -533,10 +545,10 @@ void NativeA2DPSink::reconnect_schedule_next() {
             return;
         }
     }
-    reconnect_arm_timer();
+    reconnect_arm_timer(reconnect_delay);
 }
 
-void NativeA2DPSink::reconnect_arm_timer() {
+void NativeA2DPSink::reconnect_arm_timer(int delay_ms) {
     if (!reconnect_timer) {
         esp_timer_create_args_t args = {};
         args.callback = [](void *) {
@@ -545,7 +557,7 @@ void NativeA2DPSink::reconnect_arm_timer() {
         args.name = "a2dp_reconnect";
         if (esp_timer_create(&args, &reconnect_timer) != ESP_OK) { reconnect_status = AutoReconnect; return; }
     }
-    esp_timer_start_once(reconnect_timer, (uint64_t)reconnect_delay * 1000);
+    esp_timer_start_once(reconnect_timer, (uint64_t)delay_ms * 1000);
 }
 
 void NativeA2DPSink::reconnect_on_connection_state(esp_a2d_connection_state_t state, esp_a2d_disc_rsn_t rsn, const uint8_t *bda) {
@@ -561,7 +573,7 @@ void NativeA2DPSink::reconnect_on_connection_state(esp_a2d_connection_state_t st
             memcpy(reconnect_targets[0], bda, ESP_BD_ADDR_LEN);
             reconnect_target_count = 1;
             ESP_LOGI(TAG, "auto-reconnect: link lost");
-            reconnect_start(try_reconnect_max_count, true);
+            reconnect_start(try_reconnect_max_count, reconnect_delay);
         }
     }
 }
