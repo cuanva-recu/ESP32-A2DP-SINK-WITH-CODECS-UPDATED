@@ -3346,24 +3346,16 @@ static UINT8 bta_dm_sp_cback (tBTM_SP_EVT event, tBTM_SP_EVT_DATA *p_data)
     case BTM_SP_KEY_NOTIF_EVT:
         if (BTM_SP_CFM_REQ_EVT == event) {
             /* Due to the switch case falling through below to BTM_SP_KEY_NOTIF_EVT,
-               call remote name request using values from cfm_req */
-            if (p_data->cfm_req.bd_name[0] == 0) {
-                bta_dm_cb.pin_evt = pin_evt;
-                bdcpy(bta_dm_cb.pin_bd_addr, p_data->cfm_req.bd_addr);
-                BTA_COPY_DEVICE_CLASS(bta_dm_cb.pin_dev_class, p_data->cfm_req.dev_class);
-                if ((BTM_ReadRemoteDeviceName(p_data->cfm_req.bd_addr, bta_dm_pinname_cback,
-                                              BT_TRANSPORT_BR_EDR)) == BTM_CMD_STARTED) {
-                    return BTM_CMD_STARTED;
-                }
-                APPL_TRACE_WARNING(" bta_dm_sp_cback() -> Failed to start Remote Name Request  ");
-            } else {
-                /* Due to the switch case falling through below to BTM_SP_KEY_NOTIF_EVT,
-                   copy these values into key_notif from cfm_req */
-                bdcpy(sec_event.key_notif.bd_addr, p_data->cfm_req.bd_addr);
-                BTA_COPY_DEVICE_CLASS(sec_event.key_notif.dev_class, p_data->cfm_req.dev_class);
-                BCM_STRNCPY_S((char *)sec_event.key_notif.bd_name, (char *)p_data->cfm_req.bd_name, BD_NAME_LEN);
-                sec_event.key_notif.bd_name[BD_NAME_LEN] = '\0';
-            }
+               copy these values into key_notif from cfm_req.
+               Pass the request on even when the name is unknown: a remote name
+               request here adds LMP traffic in the middle of simple pairing, and
+               by the time it completes the ESP32 controller has left its
+               wait-for-confirm state and rejects the reply ("E(25, 0) in
+               user_cfm_req_reply"), failing new pairings such as an iPhone's. */
+            bdcpy(sec_event.key_notif.bd_addr, p_data->cfm_req.bd_addr);
+            BTA_COPY_DEVICE_CLASS(sec_event.key_notif.dev_class, p_data->cfm_req.dev_class);
+            BCM_STRNCPY_S((char *)sec_event.key_notif.bd_name, (char *)p_data->cfm_req.bd_name, BD_NAME_LEN);
+            sec_event.key_notif.bd_name[BD_NAME_LEN] = '\0';
         }
 
         bta_dm_cb.num_val = sec_event.key_notif.passkey = p_data->key_notif.passkey;

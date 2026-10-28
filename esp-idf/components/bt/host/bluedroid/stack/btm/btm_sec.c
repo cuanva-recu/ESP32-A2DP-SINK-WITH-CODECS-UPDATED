@@ -4796,8 +4796,13 @@ void btm_sec_link_key_notification (UINT8 *p_bda, UINT8 *p_link_key, UINT8 key_t
 
     /* If name is not known at this point delay calling callback until the name is   */
     /* resolved. Unless it is a HID Device and we really need to send all link keys. */
+    /* Only when we are bonding, which requests the name below. A source that paired */
+    /* with us gets no name request (it is no longer sent when the link comes up, to */
+    /* keep LMP traffic away from the source's authentication), so delaying here     */
+    /* would never store its link key. The name is cosmetic; send the key now.       */
     if ((!(p_dev_rec->sec_flags & BTM_SEC_NAME_KNOWN)
             &&  ((p_dev_rec->dev_class[1] & BTM_COD_MAJOR_CLASS_MASK) != BTM_COD_MAJOR_PERIPHERAL))
+            && we_are_bonding
             && !ltk_derived_lk) {
         BTM_TRACE_EVENT ("btm_sec_link_key_notification()  Delayed BDA: %08x%04x Type:%d\n",
                          (p_bda[0] << 24) + (p_bda[1] << 16) + (p_bda[2] << 8) + p_bda[3],

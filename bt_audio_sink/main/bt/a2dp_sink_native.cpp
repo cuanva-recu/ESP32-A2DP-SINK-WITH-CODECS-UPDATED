@@ -136,6 +136,7 @@ void NativeA2DPSink::gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *
         else ESP_LOGE(BT_AV_TAG, "auth failed, status:%d", param->auth_cmpl.stat);
         break;
     case ESP_BT_GAP_CFM_REQ_EVT:
+        ESP_LOGI(BT_AV_TAG, "ssp confirm request, num_val %" PRIu32 " - accepting", param->cfm_req.num_val);
         esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
         break;
     case ESP_BT_GAP_MODE_CHG_EVT:
