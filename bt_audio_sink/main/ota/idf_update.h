@@ -25,6 +25,7 @@ public:
         UPDATE_ERROR_NO_PARTITION = 10,
         UPDATE_ERROR_BAD_ARGUMENT = 11,
         UPDATE_ERROR_ABORT        = 12,
+        UPDATE_ERROR_VERIFY       = 13,  // image check or signature failed
     };
 
     using ProgressCb = void (*)(size_t written, size_t total);

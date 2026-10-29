@@ -35,3 +35,6 @@ __pycache__/
 
 # Board-variant build directories created by build_flash.sh
 build_*/
+
+# Firmware signing key (sdkconfig.defaults: CONFIG_SECURE_BOOT_SIGNING_KEY)
+*.pem

@@ -308,7 +308,20 @@ The Bluetooth decode path and render path are separated so the ESP32 can absorb 
 
 ### BLE OTA
 
-Firmware updates can be sent over BLE through the unified protocol. The main application receives encrypted firmware data and writes it to the OTA partition.
+Firmware updates can be sent over BLE through the unified protocol. The main application writes the image to the other OTA partition, verifies it, and restarts into it. If the new image doesn't start, the bootloader rolls back to the previous one.
+
+BLE OTA images must be signed. The build signs `bt_audio_sink.bin` with `bt_audio_sink/secure_boot_signing_key.pem` (ECDSA P-256, ESP-IDF "signed app images without hardware secure boot"), and the running firmware rejects any image whose signature doesn't verify against the public key built into it. The phone app then gets an "OTA failed" (verify) response, and audio comes back. The image itself isn't encrypted; signing stops anyone in BLE range from installing their own firmware.
+
+No eFuses are burned and the bootloader doesn't check signatures, so flashing over USB still works with any image.
+
+To create the key for a new checkout (it is in `.gitignore` and must never be committed):
+
+```bash
+cd bt_audio_sink
+espsecure.py generate_signing_key --version 1 secure_boot_signing_key.pem
+```
+
+Keep a backup of the key. Boards running firmware built with it only accept OTA images signed with the same key; without it they can only be updated over USB.
 
 ### WiFi Recovery OTA
 
@@ -320,6 +333,11 @@ Recovery mode is only available with the 8MB partition layout. If the main firmw
 - Streams decrypt-and-flash without holding the full image in RAM.
 
 ### Security Notice
+
+There are two separate keys:
+
+- **BLE OTA signing key** (`bt_audio_sink/secure_boot_signing_key.pem`): private, never in the repository. See [BLE OTA](#ble-ota).
+- **WiFi recovery AES-256 key**: encrypts images for the recovery OTA path (8MB boards). The recovery firmware decrypts and flashes them, but does not check the BLE OTA signature.
 
 The AES-256 key in this repository is a placeholder value.
 

@@ -196,7 +196,9 @@ bool IdfUpdate::end(bool evenIfRemaining) {
     if (err != ESP_OK) {
         _lastEspErr = err;
         ESP_LOGE(TAG_UPDATE, "esp_ota_end failed: %s", esp_err_to_name(err));
-        abort_(UPDATE_ERROR_WRITE);
+        // ESP_ERR_OTA_VALIDATE_FAILED: corrupt image or, with signed apps, a
+        // missing or wrong signature.
+        abort_(err == ESP_ERR_OTA_VALIDATE_FAILED ? UPDATE_ERROR_VERIFY : UPDATE_ERROR_WRITE);
         return false;
     }
 
@@ -232,6 +234,7 @@ const char *IdfUpdate::errorString() const {
     case UPDATE_ERROR_NO_PARTITION: return "NO_PARTITION";
     case UPDATE_ERROR_BAD_ARGUMENT: return "BAD_ARGUMENT";
     case UPDATE_ERROR_ABORT: return "ABORT";
+    case UPDATE_ERROR_VERIFY: return "VERIFY";
     default: return "UNKNOWN";
     }
 }

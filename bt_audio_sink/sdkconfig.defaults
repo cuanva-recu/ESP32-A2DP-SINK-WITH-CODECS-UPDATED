@@ -107,6 +107,18 @@ CONFIG_BT_STACK_NO_LOG=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_APP_ROLLBACK_ENABLE=y
 
+# Signed app images (no hardware secure boot, no eFuses burned): the build
+# signs the app with secure_boot_signing_key.pem (ECDSA P-256, kept out of
+# git), and esp_ota_end() rejects any OTA image whose signature doesn't
+# verify against the public key built into the running app. The bootloader
+# does not check signatures, so USB flashing still works.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+# CONFIG_SECURE_SIGNED_ON_BOOT_NO_SECURE_BOOT is not set
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
+
 # Disable unused peripherals
 CONFIG_TWAI_ERRATA_FIX_BUS_OFF_REC=n
 CONFIG_TWAI_ERRATA_FIX_TX_INTR_LOST=n
