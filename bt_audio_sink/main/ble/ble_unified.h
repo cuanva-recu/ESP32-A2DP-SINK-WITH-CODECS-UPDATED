@@ -235,6 +235,22 @@ public:
             ESP_LOGI(TAG, "BLE local MTU set to 517 bytes");
         }
 
+        // BLE pairing: the board has no display or buttons, so its IO capability
+        // is NoInputNoOutput (Core Vol 3 Part H 2.3.2), and it bonds without
+        // asking for MITM protection, so every pairing is Just Works. The stack
+        // default (KeyboardDisplay + MITM) made phones ask the board to confirm
+        // or type a code it can't show, and pairing stalled until the 30 s SMP
+        // timeout.
+        uint8_t authReq = ESP_LE_AUTH_REQ_SC_BOND;
+        uint8_t ioCap = ESP_IO_CAP_NONE;
+        uint8_t keySize = 16;
+        uint8_t keyDist = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+        esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &authReq, sizeof(authReq));
+        esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &ioCap, sizeof(ioCap));
+        esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &keySize, sizeof(keySize));
+        esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &keyDist, sizeof(keyDist));
+        esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &keyDist, sizeof(keyDist));
+
         // Register callbacks
         ESP_ERROR_CHECK(esp_ble_gap_register_callback(gapEventHandler));
         ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gattsEventHandler));
@@ -716,6 +732,9 @@ private:
         case ESP_GATTS_WRITE_EVT:
             handleWriteEvent(gatts_if, param);
             break;
+        case ESP_GATTS_EXEC_WRITE_EVT:
+            handleExecWriteEvent(gatts_if, param);
+            break;
         case ESP_GATTS_MTU_EVT:
             handleMtuEvent(gatts_if, param);
             break;
@@ -741,16 +760,18 @@ private:
         m_gattsIf = gatts_if;
         
         // Configure advertising
-        // Note: Using ESP_BLE_ADV_FLAG_DMT_CONTROLLER_SPT instead of ESP_BLE_ADV_FLAG_BREDR_NOT_SPT
-        // because we DO support Classic Bluetooth (for A2DP). This tells Windows that both
-        // BLE and Classic BT are available from this device.
+        // Flags: LE General Discoverable only. "BR/EDR Not Supported" stays clear
+        // because we do support Classic Bluetooth (for A2DP); that alone tells
+        // scanners both are available. A dual-mode device must also leave the
+        // "Simultaneous LE and BR/EDR (Controller)" bit clear (Core Vol 3 Part C
+        // 13.1.1), so ESP_BLE_ADV_FLAG_DMT_CONTROLLER_SPT is not set.
         esp_ble_adv_data_t adv_data = {};
         adv_data.set_scan_rsp = false;
         adv_data.include_name = false;
         adv_data.include_txpower = true;
         adv_data.min_interval = 0x0006;
         adv_data.max_interval = 0x0010;
-        adv_data.flag = ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_DMT_CONTROLLER_SPT;
+        adv_data.flag = ESP_BLE_ADV_FLAG_GEN_DISC;
         adv_data.service_uuid_len = 16;
         adv_data.p_service_uuid = m_uuidService;
 
@@ -925,7 +946,8 @@ private:
         m_mtuExchanged = false;
         m_notifyEnabled = false;
         m_meterNotifyEnabled = false;
-        
+        clearPrepareQueue();
+
         // Stop the init timer if it's still pending (client disconnected before status sent)
         if (m_initTimer) {
             xTimerStop(m_initTimer, 0);
@@ -953,10 +975,81 @@ private:
                                     param->read.trans_id, ESP_GATT_OK, &rsp);
     }
 
+    // Long write, first step (ATT Prepare Write). The response must echo the
+    // handle, offset and value (Core Vol 3 Part F 3.4.6.2); a NULL response
+    // makes Bluedroid send nothing, and the client's ATT bearer then times out.
+    // Fragments are collected and run as one command on Execute Write, where
+    // offset and length errors are reported (3.4.6.1, 3.4.6.3).
+    void handlePrepareWrite(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
+        uint16_t offset = param->write.offset;
+        uint16_t len = param->write.len;
+
+        if (param->write.handle != m_cmdCharHandle) {
+            esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                        param->write.trans_id, ESP_GATT_WRITE_NOT_PERMIT, NULL);
+            return;
+        }
+        if (!m_prepBuf) {
+            m_prepBuf = (uint8_t*)malloc(PREP_WRITE_MAX);
+            m_prepLen = 0;
+            m_prepError = ESP_GATT_OK;
+        }
+        if (!m_prepBuf) {
+            esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                        param->write.trans_id, ESP_GATT_PREPARE_Q_FULL, NULL);
+            return;
+        }
+        if (m_prepError == ESP_GATT_OK) {
+            if (offset > m_prepLen) {
+                m_prepError = ESP_GATT_INVALID_OFFSET;
+            } else if ((uint32_t)offset + len > PREP_WRITE_MAX) {
+                m_prepError = ESP_GATT_INVALID_ATTR_LEN;
+            } else {
+                memcpy(m_prepBuf + offset, param->write.value, len);
+                if (offset + len > m_prepLen) m_prepLen = offset + len;
+            }
+        }
+
+        esp_gatt_rsp_t rsp = {};
+        rsp.attr_value.handle = param->write.handle;
+        rsp.attr_value.offset = offset;
+        rsp.attr_value.len = len;
+        memcpy(rsp.attr_value.value, param->write.value, len);
+        esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                    param->write.trans_id, ESP_GATT_OK, &rsp);
+    }
+
+    // Long write, second step (ATT Execute Write): always answered, then the
+    // collected command runs (flag EXEC) or is dropped (flag CANCEL).
+    void handleExecWriteEvent(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
+        bool execute = param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC;
+        esp_gatt_status_t status = execute ? m_prepError : ESP_GATT_OK;
+        esp_ble_gatts_send_response(gatts_if, param->exec_write.conn_id,
+                                    param->exec_write.trans_id, status, NULL);
+        if (execute && status == ESP_GATT_OK && m_prepLen >= 1) {
+            ESP_LOGI(TAG, "CMD long write: len=%u", (unsigned)m_prepLen);
+            m_notifyEnabled = true;
+            processCommand(m_prepBuf[0], &m_prepBuf[1], m_prepLen - 1);
+        }
+        clearPrepareQueue();
+    }
+
+    void clearPrepareQueue() {
+        free(m_prepBuf);
+        m_prepBuf = nullptr;
+        m_prepLen = 0;
+        m_prepError = ESP_GATT_OK;
+    }
+
     void handleWriteEvent(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
         uint16_t handle = param->write.handle;
         uint8_t* data = param->write.value;
         uint16_t len = param->write.len;
+
+        if (param->write.is_prep) {
+            handlePrepareWrite(gatts_if, param);
+            return;
+        }
 
         if (param->write.need_rsp) {
             esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
@@ -1217,6 +1310,13 @@ private:
     uint8_t m_soundStatus;
     char m_nameValue[64];
     char m_fwValue[32];
+
+    // Prepare-write queue for long command writes (allocated only while one is
+    // in progress). 512 is the maximum attribute value length (Vol 3 Part F 3.2.9).
+    static constexpr uint16_t PREP_WRITE_MAX = 512;
+    uint8_t* m_prepBuf = nullptr;
+    uint16_t m_prepLen = 0;
+    esp_gatt_status_t m_prepError = ESP_GATT_OK;
 
     // Timer for deferred init status send (replaces xTaskCreate per connect)
     TimerHandle_t m_initTimer;
