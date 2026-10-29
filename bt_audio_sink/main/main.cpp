@@ -488,7 +488,38 @@
  
  static volatile uint32_t g_otaReceived = 0;
  static volatile uint32_t g_otaTotalSize = 0;
+ static volatile bool     g_otaRestarting = false;  // update installed, restart pending
+
+ // Undo what OTA BEGIN did (A2DP output off, I2S stopped, LED progress) when
+ // an update fails or is aborted. With signed updates a rejected image is an
+ // expected outcome, and without this the board stayed silent until a reboot.
+ static void otaEndFailed() {
+     if (!g_otaActive || g_otaRestarting) return;
+     g_otaActive = false;
+     g_otaReceived = 0;
+     if (g_update.isRunning()) g_update.abort();
+     #ifdef CONFIG_LED_MATRIX_ENABLE
+     LedController::getInstance().setOtaMode(false);
+     #endif
+     g_i2s.start();
+     g_a2dp.set_output_active(true);
+     ESP_LOGW(TAG, "OTA stopped - update discarded, audio output restored");
+ }
  
+ // Restart into the new image from core 0. OTA END arrives in the Bluetooth
+ // task, which runs on core 1, and an esp_restart() from there (the APP CPU
+ // path) left core 1 crashing at the next boot (IllegalInstruction in
+ // cpu_start), so the bootloader rolled the update back.
+ static void otaRestartFromCore0() {
+     g_otaRestarting = true;
+     if (xTaskCreatePinnedToCore([](void*) {
+             vTaskDelay(pdMS_TO_TICKS(500));   // let END_OK reach the phone
+             esp_restart();
+         }, "ota_restart", 2048, nullptr, 5, nullptr, 0) != pdPASS) {
+         esp_restart();
+     }
+ }
+
  // Parse OTA control command - supports both binary and ASCII protocols
  // Binary: 0x01 + 4-byte size (BEGIN), 0x03 (END), 0x04 (ABORT)
  // ASCII: "BEGIN:<size>", "END", "ABORT"
@@ -525,11 +556,7 @@
          if (!g_update.begin(size)) {
              ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
              g_ble.notifyOtaCtrl("BEGIN_ERR");
-             g_otaActive = false;
-             #ifdef CONFIG_LED_MATRIX_ENABLE
-             LedController::getInstance().setOtaMode(false);
-             #endif
-             g_i2s.start();
+             otaEndFailed();
          } else {
              ESP_LOGI(TAG, "OTA begin OK, waiting for data...");
              g_ble.notifyOtaCtrl("BEGIN_OK");
@@ -565,13 +592,12 @@
          if (g_update.end(true)) {
              g_ble.notifyOtaCtrl("END_OK");
              ESP_LOGI(TAG, "OTA complete, restarting...");
-             vTaskDelay(pdMS_TO_TICKS(500));
-             esp_restart();
+             otaRestartFromCore0();
          } else {
              ESP_LOGE(TAG, "OTA end failed: %s", g_update.errorString());
              g_ble.notifyOtaCtrl("END_ERR");
+             otaEndFailed();
          }
-         g_otaActive = false;
          return;
      }
      
@@ -612,6 +638,7 @@
                      } else {
                          ESP_LOGE(TAG, "OTA auto-finalize failed: %s", g_update.errorString());
                          g_ble.notifyOtaCtrl("END_ERR");
+                         otaEndFailed();
                      }
                      g_otaActive = false;
                      g_otaCheckPassedTime = 0;
@@ -630,8 +657,7 @@
      
      if (data[0] == 'A' && len >= 5 && memcmp(data, "ABORT", 5) == 0) {
          ESP_LOGW(TAG, "OTA ABORT (ASCII)");
-         g_otaActive = false;
-         g_otaReceived = 0;
+         otaEndFailed();
          g_ble.notifyOtaCtrl("ABORT_OK");
          return;
      }
@@ -661,11 +687,7 @@
          if (!g_update.begin(size)) {
              ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
              g_ble.notifyOtaCtrl("BEGIN_ERR");
-             g_otaActive = false;
-             #ifdef CONFIG_LED_MATRIX_ENABLE
-             LedController::getInstance().setOtaMode(false);
-             #endif
-             g_i2s.start();
+             otaEndFailed();
          } else {
              ESP_LOGI(TAG, "OTA begin OK, waiting for data...");
              g_ble.notifyOtaCtrl("BEGIN_OK");
@@ -693,17 +715,15 @@
          if (g_update.end(true)) {
              g_ble.notifyOtaCtrl("END_OK");
              ESP_LOGI(TAG, "OTA complete, restarting...");
-             vTaskDelay(pdMS_TO_TICKS(500));
-             esp_restart();
+             otaRestartFromCore0();
          } else {
              ESP_LOGE(TAG, "OTA end failed: %s", g_update.errorString());
              g_ble.notifyOtaCtrl("END_ERR");
+             otaEndFailed();
          }
-         g_otaActive = false;
      } else if (cmd == 0x04) { // ABORT
          ESP_LOGW(TAG, "OTA ABORT (binary)");
-         g_otaActive = false;
-         g_otaReceived = 0;
+         otaEndFailed();
      } else {
          ESP_LOGW(TAG, "OTA CTRL unknown cmd: 0x%02X (char='%c')", cmd, (cmd >= 32 && cmd < 127) ? cmd : '?');
      }
@@ -1792,7 +1812,10 @@
      static int badWindows = 0;
  
      const int64_t now = esp_timer_get_time();
-     const bool streaming = g_streamStarted && g_a2dpConnected && !g_codecReconfiguring;
+     // OTA turns audio output off on purpose, so packets arrive while nothing
+     // plays; without this a source that kept streaming made the check restart
+     // the board in the middle of an update.
+     const bool streaming = g_streamStarted && g_a2dpConnected && !g_codecReconfiguring && !g_otaActive;
      if (!streaming || !wasStreaming) {
          wasStreaming = streaming;
          windowStartUs = now;
@@ -2390,6 +2413,10 @@
      g_ble.setDisconnectCallback([]() {
          if (g_soundUploadActive) {
              abortSoundUpload(0x0B, false);
+         }
+         if (g_otaActive) {
+             ESP_LOGW(TAG, "BLE disconnected during OTA - aborting update");
+             otaEndFailed();
          }
          ESP_LOGI(TAG, "BLE disconnect - internal heap free=%u min_ever=%u",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
