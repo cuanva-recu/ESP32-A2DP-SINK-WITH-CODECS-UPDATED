@@ -108,6 +108,21 @@ enum {
 
 /* Jitter buffer state, owned by the sink task */
 static BOOLEAN jb_primed = FALSE;
+/* Receive-path counters for the application's stuck-stream diagnostics
+ * (btc_a2dp_sink_get_diag): where media packets go after they arrive. */
+enum {
+    SNK_DIAG_DROP_FLUSH,     /* dropped at enqueue: rx_flush set or decoder not ready */
+    SNK_DIAG_DROP_FULL,      /* dropped at enqueue: queue full */
+    SNK_DIAG_DROP_LOWMEM,    /* dropped from the queue under memory pressure */
+    SNK_DIAG_ENQUEUED,
+    SNK_DIAG_DECODED,        /* handed to the decoder */
+    SNK_DIAG_SKIP_FLUSH,     /* dequeued but discarded: rx_flush set */
+    SNK_DIAG_SKIP_NOT_READY, /* dequeued but discarded: decoder or buffer not ready */
+    SNK_DIAG_SKIP_NO_DATACHNL, /* dequeued but discarded: data channel closed */
+    SNK_DIAG_SKIP_HEADER,    /* packet header rejected by the decoder */
+    SNK_DIAG_COUNT
+};
+static volatile uint32_t snk_diag[SNK_DIAG_COUNT];
 static int64_t jb_start_us = 0;
 
 #define A2DP_TASK_NAME                   "A2DP_DECODER"
@@ -696,21 +711,25 @@ static void btc_a2dp_sink_handle_inc_media(BT_HDR *p_msg)
     /* XXX: Check if the below check is correct, we are checking for peer to be sink when we are sink */
     if (btc_av_get_peer_sep() == AVDT_TSEP_SNK || (a2dp_sink_local_param.btc_aa_snk_cb.rx_flush)) {
         APPL_TRACE_DEBUG(" State Changed happened in this tick ");
+        snk_diag[SNK_DIAG_SKIP_FLUSH]++;
         return;
     }
 
     if (a2dp_sink_local_param.decoder_ready == FALSE || !a2dp_sink_local_param.decoder) {
         APPL_TRACE_WARNING("%s: dropping media packet before decoder is ready", __func__);
+        snk_diag[SNK_DIAG_SKIP_NOT_READY]++;
         return;
     }
 
     if (a2dp_sink_local_param.decode_buf_len != 0 && !a2dp_sink_local_param.decode_buf) {
         APPL_TRACE_WARNING("%s: dropping media packet because decode buffer is unavailable", __func__);
+        snk_diag[SNK_DIAG_SKIP_NOT_READY]++;
         return;
     }
 
     // ignore data if no one is listening
     if (!btc_a2dp_control_get_datachnl_stat()) {
+        snk_diag[SNK_DIAG_SKIP_NO_DATACHNL]++;
         return;
     }
 
@@ -729,11 +748,13 @@ static void btc_a2dp_sink_handle_inc_media(BT_HDR *p_msg)
     if (a2dp_sink_local_param.decoder->decode_packet_header) {
         ssize_t res = a2dp_sink_local_param.decoder->decode_packet_header(p_msg);
         if (res < 0) {
+            snk_diag[SNK_DIAG_SKIP_HEADER]++;
             return;
         }
     }
 
     if (a2dp_sink_local_param.decoder->decode_packet) {
+        snk_diag[SNK_DIAG_DECODED]++;
         unsigned char* buf = a2dp_sink_local_param.decode_buf;
         size_t buf_len = a2dp_sink_local_param.decode_buf_len;
         a2dp_sink_local_param.decoder->decode_packet(p_msg, buf, buf_len);
@@ -803,6 +824,34 @@ uint32_t btc_a2dp_sink_get_rx_pkt_count(void)
     return rx_pkt_count;
 }
 
+/* aptX decoder resyncs (a2dp_vendor_aptx_decoder.c), if aptX is built in */
+extern uint32_t a2dp_aptx_decoder_get_resyncs(void) __attribute__((weak));
+
+/* Fills out[0..SNK_DIAG_COUNT-1] with the counters above, then: received
+ * packets, queue length, a flag word (bit 0 rx_flush, bit 1 decoder_ready,
+ * bit 2 jitter buffer primed, bit 3 data channel open) and aptX decoder
+ * resyncs. Returns the number of values written. */
+size_t btc_a2dp_sink_get_diag(uint32_t *out, size_t n)
+{
+    size_t i = 0;
+    for (; i < SNK_DIAG_COUNT && i < n; i++) {
+        out[i] = snk_diag[i];
+    }
+    if (i < n) out[i++] = rx_pkt_count;
+    if (i < n) {
+        fixed_queue_t *q = a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ;
+        out[i++] = q ? fixed_queue_length(q) : 0;
+    }
+    if (i < n) {
+        out[i++] = (a2dp_sink_local_param.btc_aa_snk_cb.rx_flush ? 1u : 0u)
+                 | (a2dp_sink_local_param.decoder_ready ? 2u : 0u)
+                 | (jb_primed ? 4u : 0u)
+                 | (btc_a2dp_control_get_datachnl_stat() ? 8u : 0u);
+    }
+    if (i < n) out[i++] = a2dp_aptx_decoder_get_resyncs ? a2dp_aptx_decoder_get_resyncs() : 0;
+    return i;
+}
+
 UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
 {
     if (btc_a2dp_sink_state != BTC_A2DP_SINK_STATE_ON){
@@ -819,6 +868,7 @@ UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
     rx_pkt_count++;
     if (a2dp_sink_local_param.btc_aa_snk_cb.rx_flush == TRUE ||
         a2dp_sink_local_param.decoder_ready == FALSE) { /* Flush enabled, do not enque*/
+        snk_diag[SNK_DIAG_DROP_FLUSH]++;
         osi_free(p_pkt);  /* Free original - caller expects us to take ownership */
         return fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
     }
@@ -826,6 +876,7 @@ UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
     UINT8 queue_limit = btc_a2dp_sink_queue_limit();
     if (fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ) >= queue_limit) {
         APPL_TRACE_WARNING("Pkt dropped, codec queue full (%u)\n", (unsigned)queue_limit);
+        snk_diag[SNK_DIAG_DROP_FULL]++;
         osi_free(p_pkt);  /* Free original - caller expects us to take ownership */
         return fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
     }
@@ -849,6 +900,7 @@ UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
                     for (int i = 0; i < to_drop; i++) {
                         void *buf = fixed_queue_dequeue(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ, 0);
                         if (buf) {
+                            snk_diag[SNK_DIAG_DROP_LOWMEM]++;
                             osi_free(buf);
                         }
                     }
@@ -865,9 +917,11 @@ UINT8 btc_a2dp_sink_enque_buf(BT_HDR *p_pkt)
      * This eliminates one malloc+free per packet and avoids transient
      * double-allocation spikes that cause OOM during LDAC streaming. */
     if (!fixed_queue_enqueue(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ, p_pkt, 0)) {
+        snk_diag[SNK_DIAG_DROP_FULL]++;
         osi_free(p_pkt);
         return fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
     }
+    snk_diag[SNK_DIAG_ENQUEUED]++;
     osi_thread_post_event(a2dp_sink_local_param.btc_aa_snk_cb.data_ready_event, 0);
     return fixed_queue_length(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ);
 }

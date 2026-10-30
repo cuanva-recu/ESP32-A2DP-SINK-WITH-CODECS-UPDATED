@@ -113,6 +113,36 @@
  // Stream health check (see checkStreamHealth)
  static volatile bool     g_streamStarted = false;       // A2DP audio state is STARTED
  static volatile int64_t  g_streamStartTimeUs = 0;
+
+ // Stuck-stream diagnostics: recent A2DP events and decoded-data counters,
+ // logged while the health check sees a stuck stream and saved to NVS before
+ // it restarts the board (see diagSaveReport).
+ struct DiagEvent { uint32_t ms; char kind; uint32_t a, b; };
+ static DiagEvent         g_diagEvents[16];
+ static uint8_t           g_diagEventNext = 0, g_diagEventCount = 0;
+ static portMUX_TYPE      g_diagMux = portMUX_INITIALIZER_UNLOCKED;
+ static volatile uint32_t g_diagDecodedBytes = 0;    // decoder output delivered to the app
+ static volatile uint32_t g_diagDiscardedBytes = 0;  // ...of which dropped (codec switch, OTA)
+
+ // kind: 'C' connection state a, 'A' audio state a, 'K' codec rate a, type<<8|bits b,
+ // 'F' health-check flush, 'R' health-check restart
+ static void diagEvent(char kind, uint32_t a = 0, uint32_t b = 0) {
+     portENTER_CRITICAL(&g_diagMux);
+     g_diagEvents[g_diagEventNext] = { (uint32_t)(esp_timer_get_time() / 1000), kind, a, b };
+     g_diagEventNext = (g_diagEventNext + 1) % (sizeof(g_diagEvents) / sizeof(g_diagEvents[0]));
+     if (g_diagEventCount < sizeof(g_diagEvents) / sizeof(g_diagEvents[0])) g_diagEventCount++;
+     portEXIT_CRITICAL(&g_diagMux);
+ }
+ 
+ // Bluedroid receive-path counters (btc_a2dp_sink_get_diag): 9 counters, then
+ // received packets, queue length, flags (bit 0 rx_flush, 1 decoder ready,
+ // 2 jitter buffer primed, 3 data channel open) and aptX decoder resyncs
+ extern "C" size_t btc_a2dp_sink_get_diag(uint32_t *out, size_t n);
+ static const int SNK_DIAG_COUNTERS = 9;
+ static const int SNK_DIAG_VALUES = SNK_DIAG_COUNTERS + 4;
+ static const char* const SNK_DIAG_NAMES[SNK_DIAG_COUNTERS] = {
+     "drop-flush", "drop-full", "drop-lowmem", "queued", "decoded",
+     "skip-flush", "skip-notready", "skip-nodata", "skip-header" };
  static volatile bool     g_connectionAnnounced = false;    // Connect sound already handled for this session
  static const int64_t     CODEC_STABLE_DELAY_US = 400000;   // 400ms - wait this long after last codec config
  
@@ -1533,6 +1563,7 @@
      // Get codec type (the library's codec_config.c already logs vendor ID details)
      esp_a2d_mct_t codecType = g_a2dp.get_audio_type();
      const char* codecName = getCodecName(codecType);
+     diagEvent('K', rate, ((uint32_t)codecType << 8) | bps);
      
      ESP_LOGI(TAG, "========================================");
      ESP_LOGI(TAG, "CODEC CONFIGURATION RECEIVED");
@@ -1571,7 +1602,9 @@
  }
  
  static void onStreamData(const uint8_t* data, uint32_t len) {
+     g_diagDecodedBytes += len;
      if (g_codecReconfiguring || g_otaActive) {
+         g_diagDiscardedBytes += len;
          return;
      }
  
@@ -1655,6 +1688,7 @@
  }
  
  static void onConnectionState(esp_a2d_connection_state_t state, void* user) {
+     diagEvent('C', state);
      const char* stateStr = "Unknown";
      switch (state) {
          case ESP_A2D_CONNECTION_STATE_DISCONNECTED: stateStr = "DISCONNECTED"; break;
@@ -1775,6 +1809,11 @@
      }
      
      ESP_LOGI(TAG, ">>> A2DP Audio State: %s", stateStr);
+     {
+         uint32_t diag[SNK_DIAG_VALUES] = {};
+         btc_a2dp_sink_get_diag(diag, SNK_DIAG_VALUES);
+         diagEvent('A', state, diag[SNK_DIAG_COUNTERS + 3]);   // b = aptX resyncs so far
+     }
      
      g_streamStarted = (state == ESP_A2D_AUDIO_STATE_STARTED);
      if (g_streamStarted) g_streamStartTimeUs = esp_timer_get_time();
@@ -1801,6 +1840,87 @@
  // too, so it never triggers this.
  extern "C" uint32_t btc_a2dp_sink_get_rx_pkt_count(void);
  
+ 
+ // Stuck-stream reports are saved to NVS (flash, so they survive the car
+ // cutting power) and printed at every boot, oldest first. The last
+ // DIAG_REPORT_SLOTS incidents are kept. An incident claims a slot when the
+ // health check flushes the buffer and updates it if the board then restarts,
+ // so a power cut during the stuck stream still leaves a report.
+ static const uint8_t DIAG_REPORT_SLOTS = 3;
+ static int8_t g_diagIncidentSlot = -1;     // slot of the incident in progress
+ static uint32_t g_diagIncidentSeq = 0;
+ 
+ static void diagSaveReport(const char* window, const char* stage) {
+     nvs_handle_t h;
+     if (nvs_open("diag", NVS_READWRITE, &h) != ESP_OK) return;
+     if (g_diagIncidentSlot < 0) {
+         uint8_t next = 0;
+         uint32_t seq = 0;
+         nvs_get_u8(h, "next", &next);
+         nvs_get_u32(h, "seq", &seq);
+         g_diagIncidentSlot = next % DIAG_REPORT_SLOTS;
+         g_diagIncidentSeq = seq + 1;
+         nvs_set_u8(h, "next", (uint8_t)((g_diagIncidentSlot + 1) % DIAG_REPORT_SLOTS));
+         nvs_set_u32(h, "seq", g_diagIncidentSeq);
+     }
+ 
+     // Static, not on the stack: this runs in the buttons task, whose stack is small
+     static DiagEvent ev[sizeof(g_diagEvents) / sizeof(g_diagEvents[0])];
+     static char rep[900];
+     uint8_t count, next;
+     portENTER_CRITICAL(&g_diagMux);
+     memcpy(ev, g_diagEvents, sizeof(ev));
+     count = g_diagEventCount;
+     next = g_diagEventNext;
+     portEXIT_CRITICAL(&g_diagMux);
+ 
+     int n = snprintf(rep, sizeof(rep), "#%u %s at %us, codec 0x%02X %u Hz %u-bit; last window: %s; events (s):",
+                      (unsigned)g_diagIncidentSeq, stage, (unsigned)(esp_timer_get_time() / 1000000),
+                      (unsigned)g_a2dp.get_audio_type(), (unsigned)g_sampleRate,
+                      (unsigned)g_bitsPerSample, window);
+     const uint8_t size = sizeof(ev) / sizeof(ev[0]);
+     for (uint8_t i = 0; i < count && n < (int)sizeof(rep); i++) {
+         const DiagEvent& e = ev[(next + size - count + i) % size];
+         n += snprintf(rep + n, sizeof(rep) - n, " %c%u@%u.%03u", e.kind, (unsigned)e.a,
+                       (unsigned)(e.ms / 1000), (unsigned)(e.ms % 1000));
+         if (e.kind == 'K' && n < (int)sizeof(rep)) {
+             n += snprintf(rep + n, sizeof(rep) - n, "/0x%X", (unsigned)e.b);
+         } else if (e.kind == 'A' && e.b && n < (int)sizeof(rep)) {
+             n += snprintf(rep + n, sizeof(rep) - n, "/r%u", (unsigned)e.b);   // aptX resyncs so far
+         }
+     }
+     char key[8];
+     snprintf(key, sizeof(key), "stuck%d", g_diagIncidentSlot);
+     nvs_set_str(h, key, rep);
+     nvs_commit(h);
+     nvs_close(h);
+     ESP_LOGW(TAG, "Stuck-stream report saved: %s", rep);
+ }
+ 
+ // The stream recovered: the next stuck stream is a new incident
+ static void diagEndIncident() {
+     g_diagIncidentSlot = -1;
+ }
+ 
+ static void diagPrintSavedReports() {
+     nvs_handle_t h;
+     if (nvs_open("diag", NVS_READONLY, &h) != ESP_OK) return;
+     uint8_t next = 0;
+     nvs_get_u8(h, "next", &next);
+     for (uint8_t i = 0; i < DIAG_REPORT_SLOTS; i++) {
+         char key[8];
+         snprintf(key, sizeof(key), "stuck%d", (next + i) % DIAG_REPORT_SLOTS);   // oldest first
+         size_t len = 0;
+         if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len <= 1) continue;
+         char* rep = (char*)malloc(len);
+         if (rep && nvs_get_str(h, key, rep, &len) == ESP_OK) {
+             ESP_LOGW(TAG, "Saved stuck-stream report %s", rep);
+         }
+         free(rep);
+     }
+     nvs_close(h);
+ }
+ 
  static void checkStreamHealth() {
      static const int64_t WINDOW_US = 1000000;
      static const int64_t SETTLE_US = 2000000;    // ignore the stream start
@@ -1810,6 +1930,9 @@
      static int64_t windowStartUs = 0;
      static uint32_t lastPkts = 0, lastFrames = 0, peakPkts = 0;
      static int badWindows = 0;
+     static uint32_t lastDiag[SNK_DIAG_VALUES] = {};
+     static uint32_t lastDecoded = 0, lastDiscarded = 0, lastDrops = 0, lastUnderruns = 0;
+     static char window[360];
  
      const int64_t now = esp_timer_get_time();
      // OTA turns audio output off on purpose, so packets arrive while nothing
@@ -1821,11 +1944,18 @@
          windowStartUs = now;
          lastPkts = btc_a2dp_sink_get_rx_pkt_count();
          lastFrames = g_pipeline.getBtFramesOut();
+         btc_a2dp_sink_get_diag(lastDiag, SNK_DIAG_VALUES);
+         lastDecoded = g_diagDecodedBytes;
+         lastDiscarded = g_diagDiscardedBytes;
+         lastDrops = g_pipeline.getDropCount();
+         lastUnderruns = g_pipeline.getUnderrunCount();
          peakPkts = 0;
+         if (badWindows) diagEndIncident();
          badWindows = 0;
          return;
      }
      if (now - windowStartUs < WINDOW_US) return;
+     const uint32_t windowMs = (uint32_t)((now - windowStartUs) / 1000);
  
      const uint32_t pktCount = btc_a2dp_sink_get_rx_pkt_count();
      const uint32_t frameCount = g_pipeline.getBtFramesOut();
@@ -1836,8 +1966,46 @@
      lastPkts = pktCount;
      lastFrames = frameCount;
  
+     // Where this window's packets went: Bluedroid receive path, decoder output
+     // vs what the current codec setting needs, and the ring buffer
+     uint32_t diag[SNK_DIAG_VALUES] = {};
+     btc_a2dp_sink_get_diag(diag, SNK_DIAG_VALUES);
+     const uint32_t decoded = g_diagDecodedBytes, discarded = g_diagDiscardedBytes;
+     const uint32_t drops = g_pipeline.getDropCount(), underruns = g_pipeline.getUnderrunCount();
+     {
+         const uint32_t bytesPerSample = (g_bitsPerSample <= 16) ? 2u : ((g_bitsPerSample <= 24) ? 3u : 4u);
+         const uint32_t bytesPerFrame = bytesPerSample * (g_channels ? g_channels : 2u);
+         int n = snprintf(window, sizeof(window), "rx %u", (unsigned)(diag[SNK_DIAG_COUNTERS] - lastDiag[SNK_DIAG_COUNTERS]));
+         for (int i = 0; i < SNK_DIAG_COUNTERS && n < (int)sizeof(window); i++) {
+             const uint32_t d = diag[i] - lastDiag[i];
+             if (d) n += snprintf(window + n, sizeof(window) - n, " %s %u", SNK_DIAG_NAMES[i], (unsigned)d);
+         }
+         const uint32_t resyncs = diag[SNK_DIAG_COUNTERS + 3] - lastDiag[SNK_DIAG_COUNTERS + 3];
+         if (resyncs && n < (int)sizeof(window)) {
+             n += snprintf(window + n, sizeof(window) - n, " aptx-resyncs %u", (unsigned)resyncs);
+         }
+         if (n < (int)sizeof(window)) {
+             snprintf(window + n, sizeof(window) - n,
+                      " | queue %u flags 0x%X | decoded %u B/s, setting needs %u (%u B/frame), discarded %u B"
+                      " | ring %u/%u, drops %u, underruns %u, active %d",
+                      (unsigned)diag[SNK_DIAG_COUNTERS + 1], (unsigned)diag[SNK_DIAG_COUNTERS + 2],
+                      (unsigned)((uint64_t)(decoded - lastDecoded) * 1000 / (windowMs ? windowMs : 1)),
+                      (unsigned)(bytesPerFrame * g_sampleRate), (unsigned)bytesPerFrame,
+                      (unsigned)(discarded - lastDiscarded),
+                      (unsigned)g_pipeline.getFillFrames(), (unsigned)g_pipeline.getCapacityFrames(),
+                      (unsigned)(drops - lastDrops), (unsigned)(underruns - lastUnderruns),
+                      g_pipeline.isAudioActive() ? 1 : 0);
+         }
+     }
+     memcpy(lastDiag, diag, sizeof(diag));
+     lastDecoded = decoded;
+     lastDiscarded = discarded;
+     lastDrops = drops;
+     lastUnderruns = underruns;
+ 
      // Sounds mute or duck the stream, so their windows say nothing
      if (g_sound.isPlaying() || now - g_streamStartTimeUs < SETTLE_US) {
+         if (badWindows) diagEndIncident();
          badWindows = 0;
          return;
      }
@@ -1845,6 +2013,7 @@
      const bool sourceSending = peakPkts >= 10 && pkts * 5 >= peakPkts * 4;
      const bool outputShort = frames * 10 < expected * 7;
      if (!sourceSending || !outputShort) {
+         if (badWindows) diagEndIncident();
          badWindows = 0;
          return;
      }
@@ -1852,12 +2021,17 @@
      badWindows++;
      ESP_LOGW(TAG, "Stream health: %u packets/s but played %u of %u frames",
               (unsigned)pkts, (unsigned)frames, (unsigned)expected);
+     ESP_LOGW(TAG, "Stream health:   %s", window);
      if (badWindows == FLUSH_AFTER) {
          ESP_LOGW(TAG, "Stream health: flushing the audio buffer");
+         diagEvent('F');
+         diagSaveReport(window, "flushed");
          g_pipeline.clear();
          g_i2s.zeroDMA();
      } else if (badWindows == RESTART_AFTER) {
          ESP_LOGW(TAG, "Stream health: still stuck - restarting to reconnect the source");
+         diagEvent('R');
+         diagSaveReport(window, "restarted");
          // Shut Bluetooth down first so the source sees the link drop now
          // instead of waiting out its supervision timeout before reconnecting
          esp_bluedroid_disable();
@@ -2162,6 +2336,7 @@
      }
      logHeap("after_nvs");
      ESP_LOGI(TAG, "Booting ESP32 A2DP Sink + BLE + DSP...");
+     diagPrintSavedReports();
  
      // OTA validation
      const esp_partition_t* running = esp_ota_get_running_partition();
