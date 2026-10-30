@@ -155,5 +155,21 @@ size_t aptx_decode32(struct aptx_context *ctx,
                      size_t output_size,
                      size_t *written);
 
+/*
+ * Like aptx_decode32(), but a parity check failure does not stop decoding:
+ * the failed sample is dropped, the decoder is reset and decoding continues
+ * with the next sample, which finds the sync again within a few samples. For
+ * input that always holds whole samples, such as A2DP packets, where only the
+ * sync position can be lost (a lost packet, or the source restarting its
+ * encoder when a stream resumes). Into resyncs is stored the number of resets.
+ */
+size_t aptx_decode32_sync(struct aptx_context *ctx,
+                          const unsigned char *input,
+                          size_t input_size,
+                          unsigned char *output,
+                          size_t output_size,
+                          size_t *written,
+                          size_t *resyncs);
+
 
 #endif

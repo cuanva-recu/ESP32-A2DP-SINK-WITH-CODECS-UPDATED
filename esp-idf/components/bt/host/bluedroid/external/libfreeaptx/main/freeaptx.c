@@ -1385,3 +1385,40 @@ size_t aptx_decode32(struct aptx_context *ctx, const unsigned char *input, size_
     *written = opos;
     return ipos;
 }
+
+size_t aptx_decode32_sync(struct aptx_context *ctx, const unsigned char *input, size_t input_size, unsigned char *output, size_t output_size, size_t *written, size_t *resyncs)
+{
+    const size_t sample_size = ctx->hd ? 6 : 4;
+    int32_t samples[NB_CHANNELS][4];
+    unsigned sample, channel;
+    size_t ipos, opos;
+
+    *resyncs = 0;
+    for (ipos = 0, opos = 0; ipos + sample_size <= input_size && (opos + 4*NB_CHANNELS*4 <= output_size || ctx->decode_skip_leading > 0); ipos += sample_size) {
+        if (aptx_decode_samples(ctx, input + ipos, samples)) {
+            /* Sync lost: drop this sample, restart the decoder and look for
+             * the sync again from the next one, like aptx_decode_sync() */
+            aptx_reset(ctx);
+            (*resyncs)++;
+            continue;
+        }
+        sample = 0;
+        if (ctx->decode_skip_leading > 0) {
+            ctx->decode_skip_leading--;
+            if (ctx->decode_skip_leading > 0)
+                continue;
+            sample = LATENCY_SAMPLES%4;
+        }
+        for (; sample < 4; sample++) {
+            for (channel = 0; channel < NB_CHANNELS; channel++, opos += 4) {
+                /* Convert 24-bit signed integer to 32-bit signed integer by padding the first octet */
+                output[opos+0] = 0;
+                output[opos+1] = (uint8_t)(((uint32_t)samples[channel][sample] >>  0) & 0xFF);
+                output[opos+2] = (uint8_t)(((uint32_t)samples[channel][sample] >>  8) & 0xFF);
+                output[opos+3] = (uint8_t)(((uint32_t)samples[channel][sample] >>  16) & 0xFF);
+            }
+        }
+    }
+    *written = opos;
+    return ipos;
+}

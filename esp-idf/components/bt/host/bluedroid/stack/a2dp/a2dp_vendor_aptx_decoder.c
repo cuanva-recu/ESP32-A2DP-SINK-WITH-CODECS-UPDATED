@@ -31,12 +31,13 @@ extern size_t aptx_decode16(struct aptx_context *ctx,
                             unsigned char *output,
                             size_t output_size,
                             size_t *written);
-extern size_t aptx_decode32(struct aptx_context *ctx,
-                            const unsigned char *input,
-                            size_t input_size,
-                            unsigned char *output,
-                            size_t output_size,
-                            size_t *written);
+extern size_t aptx_decode32_sync(struct aptx_context *ctx,
+                                 const unsigned char *input,
+                                 size_t input_size,
+                                 unsigned char *output,
+                                 size_t output_size,
+                                 size_t *written,
+                                 size_t *resyncs);
 
 typedef enum
 {
@@ -52,6 +53,13 @@ typedef struct {
 } tA2DP_APTX_DECODER_CB;
 
 static tA2DP_APTX_DECODER_CB a2dp_aptx_decoder_cb;
+
+/* Decoder restarts after a lost sync, for the stuck-stream diagnostics */
+static volatile uint32_t a2dp_aptx_resyncs;
+
+uint32_t a2dp_aptx_decoder_get_resyncs(void) {
+    return a2dp_aptx_resyncs;
+}
 
 
 bool a2dp_aptx_decoder_init(decoded_data_callback_t decode_callback) {
@@ -120,8 +128,14 @@ bool a2dp_aptx_decoder_decode_packet(BT_HDR* p_buf, unsigned char* buf, size_t b
             avail = buf_len;
         }
 
-        size_t written;
-        processed = aptx_decode32(decoder_context, src, (size_t)src_size, dst, (size_t)avail, &written);
+        /* Resyncing decode: a lost sync (after a lost packet, or when the
+         * source restarts its encoder on stream resume) used to stop decoding
+         * at the first parity error, and the rest of the packet was dropped
+         * or re-decoded out of sync; the stream could stay that way, playing
+         * a few percent of the audio as clicks, until the link was reset. */
+        size_t written, resyncs;
+        processed = aptx_decode32_sync(decoder_context, src, (size_t)src_size, dst, (size_t)avail, &written, &resyncs);
+        a2dp_aptx_resyncs += resyncs;
 
         src += processed;
         src_size -= processed;
