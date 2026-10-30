@@ -443,6 +443,7 @@ The external Arduino libraries from the `PSRAM-only` branch are not used in the 
 5. PCM is pushed into the Q1.31 ring buffer with backpressure.
 6. The render task reads frames, applies DSP, mixes overlay sounds, and writes to I2S.
 7. BLE status and meter notifications are throttled when needed to protect internal heap.
+8. A stream health check flushes the buffer, then restarts the board, if the source keeps sending but playback stalls, and saves a report of where the audio was lost (see [Clicking instead of music after a phone call](#clicking-instead-of-music-after-a-phone-call-aptx)).
 
 ## Troubleshooting
 
@@ -479,6 +480,34 @@ An iPhone then reconnects in about 7 s.
 Sources that keep the Bluetooth default supervision timeout of 20 s (a
 Linux PC did here) can still miss the boot reconnect after a quick reset.
 Connect from the source once its old link has timed out.
+
+### Clicking instead of music after a phone call (aptX)
+
+Earlier builds could play high-pitched clicking instead of music when an
+aptX stream resumed, typically after a phone call: the phone suspends the
+stream during the call and resumes it afterwards. aptX has no frame
+headers, only a parity check every 8 samples to keep the decoder in step
+with the phone's encoder. After a lost sync (packets flushed at the suspend,
+or the phone restarting its encoder on resume) the decoder stopped at the
+first failed check in each packet and produced only a few percent of the
+audio. The decoder (`aptx_decode32_sync()` in libfreeaptx) now resets on a
+failed check and finds the sync again within a few samples, costing about
+2 ms of audio. This covers aptX, aptX HD and aptX LL; the other codecs have
+per-frame headers or packet-loss handling and recover on their own.
+
+As a backstop, a stream health check watches for a source sending at its
+full packet rate while the board plays far less than real time. After about
+3 s it flushes the audio buffer, and after about 8 s it restarts the board,
+which reconnects to the source (you hear the connect sound).
+
+Each time this happens the board saves a report to flash, so it survives the
+power being cut (for example by a car's ignition). The last 3 reports are
+printed at every boot as `Saved stuck-stream report #N ...`: connect the
+board over USB and open the serial monitor (115200 baud). A report shows the
+codec, where the packets went in the last stuck second (received, queued,
+decoded, dropped or skipped, and why), decoded audio against what the codec
+needs, aptX resyncs, and the last connection, stream and codec events with
+timestamps.
 
 ### LED effects are not reactive at low volume
 
